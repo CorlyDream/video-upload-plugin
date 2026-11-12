@@ -48,8 +48,6 @@ export function CoverPreviewList({ items, disabled = false, onChange }: CoverPre
 
   return <div className="cover-preview-list" aria-label="封面预览列表">
     {items.map((item, index) => {
-      const movedUp = () => onChange(moveCover(items, index, index - 1));
-      const movedDown = () => onChange(moveCover(items, index, index + 1));
       return <article
         className={`cover-preview-card${dragIndex === index ? ' is-dragging' : ''}`}
         key={item.id}
@@ -63,11 +61,7 @@ export function CoverPreviewList({ items, disabled = false, onChange }: CoverPre
           {urls[item.id] ? <img className="cover-preview-image" src={urls[item.id]} alt={`${coverRole(index)}：${item.name}`} onError={() => { setFailed(current => ({ ...current, [item.id]: true })); setUrls(current => { const next = { ...current }; delete next[item.id]; return next; }); }} /> : <span className="cover-preview-placeholder" aria-hidden="true">{failed[item.id] ? '预览不可用' : '读取中…'}</span>}
         </div>
         <div className="cover-preview-meta"><strong>{coverRole(index)}</strong><span title={item.name}>{item.name}</span></div>
-        <div className="cover-preview-actions">
-          <button type="button" aria-label={`上移 ${item.name}`} disabled={disabled || index === 0} onClick={movedUp}>↑</button>
-          <button type="button" aria-label={`下移 ${item.name}`} disabled={disabled || index === items.length - 1} onClick={movedDown}>↓</button>
-          <button type="button" aria-label={`移除 ${item.name}`} disabled={disabled} onClick={() => onChange(removeCover(items, index))}>移除</button>
-        </div>
+        <button className="cover-preview-remove" type="button" aria-label={`移除 ${item.name}`} title="移除封面" disabled={disabled} onClick={() => onChange(removeCover(items, index))}>×</button>
       </article>;
     })}
   </div>;

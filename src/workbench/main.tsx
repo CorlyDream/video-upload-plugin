@@ -221,7 +221,6 @@ function App() {
           <p className="hint">标签将以 #标签 文本填入正文；平台话题候选需要你确认。留空的字段不填写。</p>
           <label>可选封面<input aria-label="选择封面图片" type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={e=>{void chooseCover(Array.from(e.target.files ?? []));e.target.value='';}} /></label>
           <CoverPreviewList items={flattenCovers(cover, pkCovers)} disabled={metadataLocked} onChange={updateCoverOrder} />
-          {pkCovers.map((item,index)=><div key={item.id}><span>PK {index+1}：{item.name}</span><button type="button" onClick={()=>setPkCovers(items=>items.filter(c=>c.id!==item.id))}>移除 PK {index+1}</button></div>)}
           <p className="hint">最多 4 张。小红书按选择顺序第一张为主封面，其余为 PK 候选；选择多张时自动开启 PK。只支持 4:3 和 3:4。快手两种比例各取一张；只有一种比例时随机取两张（只有一张则用一张），重试沿用所选图片。抖音按横/竖比例各取第一张，没有的比例保留平台默认。不选择时保留平台默认封面。自定义封面使用平台默认裁剪，遇到额外裁剪步骤时交给你处理。</p>
         </fieldset>
         <h2>目标平台</h2><p className="hint">小红书、快手、抖音、视频号和 B 站支持实验性填表，其余平台仅交接视频；均需在原页面检查。</p><p className="hint">快手、抖音默认禁止他人下载/保存。小红书、视频号和 B 站暂未找到对应开关，会提示人工检查。</p>
