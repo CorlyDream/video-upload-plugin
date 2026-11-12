@@ -4,6 +4,10 @@ export function flattenCovers(cover: AssetMeta | undefined, pkCovers: AssetMeta[
   return cover ? [cover, ...pkCovers] : [];
 }
 
+export function coverPkEnabled(pkCovers: AssetMeta[]): boolean {
+  return pkCovers.length > 0;
+}
+
 export function splitCovers(items: AssetMeta[]): { cover: AssetMeta | undefined; pkCovers: AssetMeta[] } {
   return { cover: items[0], pkCovers: items.slice(1) };
 }

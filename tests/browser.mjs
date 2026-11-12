@@ -120,7 +120,6 @@ try {
   async function prepare(path = file) {
     await wb.getByLabel('选择本地视频').setInputFiles(path);
     await wb.getByRole('button', { name: '开始文件交接验证' }).waitFor();
-    if (!scenario.startsWith('autofill')) await wb.getByRole('checkbox',{name:'默认开启封面 PK'}).uncheck();
     await wb.waitForFunction(() => ![...document.querySelectorAll('button')].find(b => b.textContent === '开始文件交接验证').disabled);
   }
   async function clear() {
@@ -265,15 +264,13 @@ try {
       await page.close();
     }
   }
-  for (const mode of ['autofill', 'autofill-existing', 'autofill-rollback', 'autofill-upload-fail', 'autofill-cover-fail', 'autofill-no-cover', 'autofill-takeover', 'autofill-pk-multi', 'autofill-pk-existing', 'autofill-pk-off','autofill-pk-add','autofill-pk-delayed']) {
+  for (const mode of ['autofill', 'autofill-existing', 'autofill-rollback', 'autofill-upload-fail', 'autofill-cover-fail', 'autofill-no-cover', 'autofill-takeover', 'autofill-pk-multi', 'autofill-pk-existing','autofill-pk-add','autofill-pk-delayed']) {
     scenario = mode; await prepare();
     await wb.getByLabel('标题', {exact:true}).fill('小熊洗脸');
     await wb.getByLabel('内容描述', {exact:true}).fill('一起学英语\n洗脸真开心');
     await wb.getByLabel('标签', {exact:true}).fill('英语启蒙,亲子英语');
     const coverFile = join(scratch, 'cover.png');
     await writeFile(coverFile, Buffer.from(await wb.evaluate(()=>{const canvas=document.createElement('canvas');canvas.width=4;canvas.height=3;canvas.getContext('2d').fillRect(0,0,4,3);return canvas.toDataURL().split(',')[1];}),'base64'));
-    assert.equal(await wb.getByRole('checkbox',{name:'默认开启封面 PK'}).isChecked(),true);
-    if(mode==='autofill-pk-off') await wb.getByRole('checkbox',{name:'默认开启封面 PK'}).uncheck();
     if (mode !== 'autofill-no-cover') {
       await wb.getByLabel('选择封面图片').setInputFiles(coverFile);
       if(mode==='autofill-pk-multi'||mode==='autofill-pk-existing'||mode==='autofill-pk-add'||mode==='autofill-pk-delayed'){
@@ -338,8 +335,6 @@ try {
     } else if(mode==='autofill-pk-existing') {
       assert.match(await wb.locator('.task > p:not(.hint)').innerText(),/已有自定义 PK/);
       assert.equal(await target.evaluate(()=>window.coverChanges),1);
-    } else if(mode==='autofill-pk-off') {
-      assert.equal(await target.locator('.pk-cover-panel-switch input').isChecked(),false);
     } else if (mode === 'autofill-no-cover') {
       assert.match(await wb.locator('.task > p:not(.hint)').innerText(), /保留平台默认封面/);
       assert.equal(await target.evaluate(()=>window.coverChanges),0);

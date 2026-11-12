@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { flattenCovers, moveCover, removeCover, splitCovers } from '../src/core/cover-order';
+import { coverPkEnabled, flattenCovers, moveCover, removeCover, splitCovers } from '../src/core/cover-order';
 import type { AssetMeta } from '../src/core/model';
 
 const asset = (id: string): AssetMeta => ({ id, batchId: 'batch', name: `${id}.png`, size: 1, type: 'image/png', lastModified: 0, createdAt: 0 });
@@ -30,5 +30,10 @@ describe('cover ordering', () => {
     expect(moveCover(one, -1, 0)).toEqual(one);
     expect(removeCover(one, 4)).toEqual(one);
     expect(splitCovers([])).toEqual({ cover: undefined, pkCovers: [] });
+  });
+
+  it('enables PK automatically only when there are candidate covers', () => {
+    expect(coverPkEnabled([])).toBe(false);
+    expect(coverPkEnabled([asset('pk')])).toBe(true);
   });
 });
