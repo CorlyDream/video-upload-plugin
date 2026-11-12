@@ -60,7 +60,7 @@ export function CoverPreviewList({ items, disabled = false, onChange }: CoverPre
         onDrop={event => { event.preventDefault(); if (disabled) return; const from = Number(event.dataTransfer.getData('text/plain')); if (Number.isInteger(from)) onChange(moveCover(items, from, index)); setDragIndex(undefined); }}
       >
         <div className="cover-preview-image-wrap">
-          {urls[item.id] ? <img className="cover-preview-image" src={urls[item.id]} alt={`${coverRole(index)}：${item.name}`} onError={() => setFailed(current => ({ ...current, [item.id]: true }))} /> : <span className="cover-preview-placeholder" aria-hidden="true">{failed[item.id] ? '预览不可用' : '读取中…'}</span>}
+          {urls[item.id] ? <img className="cover-preview-image" src={urls[item.id]} alt={`${coverRole(index)}：${item.name}`} onError={() => { setFailed(current => ({ ...current, [item.id]: true })); setUrls(current => { const next = { ...current }; delete next[item.id]; return next; }); }} /> : <span className="cover-preview-placeholder" aria-hidden="true">{failed[item.id] ? '预览不可用' : '读取中…'}</span>}
         </div>
         <div className="cover-preview-meta"><strong>{coverRole(index)}</strong><span title={item.name}>{item.name}</span></div>
         <div className="cover-preview-actions">
