@@ -1,0 +1,99 @@
+{
+  "browser": "158.0.8127.18",
+  "observations": [
+    {
+      "origin": "https://creator.xiaohongshu.com",
+      "name": "fixture.mp4",
+      "size": 1048595,
+      "hashes": [
+        "7a6f3b6670f19c116c2f841e7066e36af3bc4782892073c08c0d112dc871c255"
+      ],
+      "changes": 1,
+      "submissions": 0,
+      "drafts": 0
+    },
+    {
+      "origin": "https://creator.douyin.com",
+      "name": "fixture.mp4",
+      "size": 1048595,
+      "hashes": [
+        "7a6f3b6670f19c116c2f841e7066e36af3bc4782892073c08c0d112dc871c255"
+      ],
+      "changes": 1,
+      "submissions": 0,
+      "drafts": 0
+    },
+    {
+      "scenario": "existing",
+      "reason": "页面已有内容或素材，为保护原稿已停止",
+      "fileChanges": 0
+    },
+    {
+      "scenario": "ambiguous",
+      "reason": "发现多个视频入口，无法确认目标，已停止",
+      "fileChanges": 0
+    }
+  ],
+  "checks": [
+    "two origins share bytes",
+    "no submit or draft",
+    "no duplicate after reload",
+    "existing content protected",
+    "ambiguous input refused",
+    "trusted edit takeover",
+    "navigation pauses",
+    "workbench disconnect pauses",
+    "cleared metadata"
+  ],
+  "storage": {
+    "state": {
+      "claims": [],
+      "grants": []
+    },
+    "estimate": {
+      "quota": 10743737430,
+      "usage": 6319190,
+      "usageDetails": {
+        "indexedDB": 6308128,
+        "serviceWorkerRegistrations": 11062
+      }
+    }
+  },
+  "failures": [],
+  "sizeRun": {
+    "source": "separate --sizes invocation; recorded tool output",
+    "syntheticBytes": true,
+    "observations": [
+      {
+        "mib": 20,
+        "cacheMs": 25,
+        "transferAndHashMs": 145,
+        "beforeUsage": 6319190,
+        "cachedUsage": 27291913,
+        "afterUsage": 27293246,
+        "jsHeapBytes": 23165620,
+        "bytesVerified": 20971520
+      },
+      {
+        "mib": 100,
+        "cacheMs": 60,
+        "transferAndHashMs": 204,
+        "beforeUsage": 27293246,
+        "cachedUsage": 132152054,
+        "afterUsage": 132153392,
+        "jsHeapBytes": 10069999,
+        "bytesVerified": 104857600
+      },
+      {
+        "mib": 500,
+        "cacheMs": 230,
+        "transferAndHashMs": 562,
+        "beforeUsage": 132153392,
+        "cachedUsage": 656442606,
+        "afterUsage": 656443951,
+        "jsHeapBytes": 257679603,
+        "bytesVerified": 524288000
+      }
+    ]
+  }
+}
