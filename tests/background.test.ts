@@ -175,10 +175,16 @@ describe('worker lifecycle races', () => {
     wb.onMessage.emit({id:'start',command:{type:'start',platform:'kuaishou'}});await settle();
     const platform=platforms.find(p=>p.id==='kuaishou')!;harness.navigate(platform.origin+platform.path,'complete');await settle();
     const task=harness.page.messages.find(m=>m.type==='run').task;
+    const originalTaskId = task.taskId;
+    const originalAttemptId = task.attemptId;
     expect(['cover','pk1','pk3']).toContain(task.coverAssetId);expect(task.pkCoverAssetIds).toEqual(['pk2']);
     harness.page.onMessage.emit({type:'checkpoint',checkpoint:{...task,step:task.step+1,status:'needs_attention',reason:'完成'}});await settle();
     wb.onMessage.emit({id:'retry',command:{type:'retry',taskId:task.taskId}});await settle();
-    const retried=wb.messages.find(m=>m.id==='retry').snapshot.batch.tasks.at(-1);
+    const retriedSnapshot=wb.messages.find(m=>m.id==='retry').snapshot.batch;
+    expect(retriedSnapshot.tasks).toHaveLength(1);
+    const retried=retriedSnapshot.tasks[0];
+    expect(retried.taskId).toBe(originalTaskId);
+    expect(retried.attemptId).not.toBe(originalAttemptId);
     expect(retried.coverAssetId).toBe(task.coverAssetId);expect(retried.pkCoverAssetIds).toEqual(task.pkCoverAssetIds);
     wb.disconnect();await settle();
   });

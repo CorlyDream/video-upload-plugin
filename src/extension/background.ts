@@ -239,10 +239,25 @@ async function command(command: WorkbenchCommand, owner: chrome.runtime.Port) {
       void diagnostics.record('tab.create.result',{tabId:tab.id,platform:platform.id});
       if (controller !== owner) throw new Error('工作台连接已失效');
       if (tab.id === undefined) throw new Error('无法创建平台页面');
-      const task: Task = { batchId: batch.id, taskId: crypto.randomUUID(), attemptId: crypto.randomUUID(), tabId: tab.id, documentId: '', step: 0, pipelineStage: 'page', status: 'checking', reason: '等待页面加载并检查唯一视频入口', platform: platform.id, assetId: batch.asset.id, createdAt: Date.now() };
+      const task: Task = previous ?? { batchId: batch.id, taskId: crypto.randomUUID(), attemptId: crypto.randomUUID(), tabId: tab.id, documentId: '', step: 0, pipelineStage: 'page', status: 'checking', reason: '等待页面加载并检查唯一视频入口', platform: platform.id, assetId: batch.asset.id, createdAt: Date.now() };
+      if (previous) Object.assign(task, {
+        batchId: batch.id,
+        attemptId: crypto.randomUUID(),
+        tabId: tab.id,
+        documentId: '',
+        step: 0,
+        pipelineStage: 'page',
+        status: 'checking',
+        reason: '等待页面加载并检查唯一视频入口',
+        diagnosticPhase: undefined,
+        videoAlreadyTransferred: undefined,
+        uploadTabId: undefined,
+        platform: platform.id,
+        assetId: batch.asset.id,
+      });
       task.publication = batch.publication ? normalizePublication(batch.publication, platform.id === 'xiaohongshu') : undefined;
       task.coverAssetId = coverIds[0]; task.pkCoverAssetIds = coverIds.slice(1); task.coverPk = platform.id==='douyin'?undefined:batch.coverPk;
-      batch.tasks.push(task);
+      if (!previous) batch.tasks.push(task);
       const initialNavigations=earlyNavigations.get(task.tabId) ?? [];
       navigations.set(task.tabId, { url: destination, loading: initialNavigations.length > 0 });
       if(initialNavigations.length > 1 || initialNavigations.some(url=>url !== destination)) {task.status='paused';task.reason='平台页面在创建期间发生额外导航，未开始上传';}
