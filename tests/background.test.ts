@@ -32,7 +32,7 @@ function port(tabId: number, name = 'workbench') {
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 async function settle() { await tick(); await tick(); }
 
-function worker(initialization: Promise<void> = Promise.resolve(), splitInitialNavigation = false) {
+function worker(initialization: Promise<void> = Promise.resolve(), splitInitialNavigation = false, emitCreationNavigation = true) {
   const page = port(7, 'upload-page');
   let tabUrl = 'about:blank';
   let tabStatus = 'loading';
@@ -54,7 +54,7 @@ function worker(initialization: Promise<void> = Promise.resolve(), splitInitialN
         tabUrl = options.url ?? 'about:blank';
         if(tabUrl !== 'about:blank'){
           if(splitInitialNavigation)chrome.tabs.onUpdated.emit(7,{status:'loading'},{url:'about:blank'});
-          chrome.webNavigation.onBeforeNavigate.emit({tabId:7,frameId:0,url:tabUrl});
+          if(emitCreationNavigation)chrome.webNavigation.onBeforeNavigate.emit({tabId:7,frameId:0,url:tabUrl});
           chrome.tabs.onUpdated.emit(7,{url:tabUrl},{url:tabUrl});
         }
         return { id: 7, url: tabUrl, status: tabStatus };
@@ -109,6 +109,12 @@ describe('worker lifecycle races', () => {
     expect(create).toHaveBeenCalledWith({url:platforms[0].origin+platforms[0].path,active:true});
     expect(update).not.toHaveBeenCalled();
     harness.navigate(platforms[0].origin+platforms[0].path,'complete');await settle();
+    expect(harness.page.messages.filter(m=>m.type==='run')).toHaveLength(1);
+    wb.disconnect();await settle();
+  });
+  it('injects once the platform URL is committed even while the SPA remains loading', async()=>{
+    const harness=worker(Promise.resolve(), false, false);const wb=port(1);harness.chrome.runtime.onConnect.emit(wb);await settle();
+    wb.onMessage.emit({id:'start',command:{type:'start',platform:'weixin'}});await settle();
     expect(harness.page.messages.filter(m=>m.type==='run')).toHaveLength(1);
     wb.disconnect();await settle();
   });

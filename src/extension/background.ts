@@ -69,15 +69,16 @@ async function finish(task: Task, status: 'failed' | 'needs_attention', reason: 
   send(pagePort, { type: 'stop' }); pagePort?.disconnect(); pagePort = undefined;
   await persist(); notify();
 }
-async function loaded(tabId:number,expectedUrl?:string):Promise<void>{
- const matches=(tab:chrome.tabs.Tab)=>tab.status==='complete'&&(!expectedUrl||tab.url===expectedUrl);
- if(matches(await chrome.tabs.get(tabId)))return;
+async function loaded(tabId:number,origin:string,expectedUrl?:string):Promise<void>{
+ const matches=(tab:chrome.tabs.Tab,allowLoading=false)=>!!tab.url&&tab.url!=='about:blank'&&new URL(tab.url).origin===origin&&(!expectedUrl||tab.url===expectedUrl)&&(tab.status==='complete'||(allowLoading&&tab.status==='loading'));
+ const current = await chrome.tabs.get(tabId);
+ if(matches(current, navigations.get(tabId)?.loading === false))return;
  await new Promise<void>((resolve,reject)=>{
   const cleanup=()=>{clearTimeout(timeout);chrome.tabs.onUpdated.removeListener(listener);chrome.tabs.onRemoved.removeListener(removed);};
   const check=()=>{void chrome.tabs.get(tabId).then(tab=>{if(matches(tab)){cleanup();resolve();}},error=>{cleanup();reject(error);});};
   const listener=(id:number)=>{if(id===tabId)check();};
   const removed=(id:number)=>{if(id===tabId){cleanup();reject(new Error('平台页面已关闭'));}};
-  const timeout=setTimeout(()=>{cleanup();reject(new Error('平台页面加载超时，请手动检查'));},30000);
+  const timeout=setTimeout(()=>{void chrome.tabs.get(tabId).then(tab=>{if(matches(tab,true)){cleanup();resolve();}else{cleanup();reject(new Error('平台页面加载超时，请手动检查'));}},error=>{cleanup();reject(error);});},30000);
   chrome.tabs.onUpdated.addListener(listener);chrome.tabs.onRemoved.addListener(removed);check();
  });
 }
@@ -85,10 +86,10 @@ async function loaded(tabId:number,expectedUrl?:string):Promise<void>{
 function stage(task: Task, phase: string) {task.diagnosticPhase=phase;void diagnostics.record('task.stage',{taskId:task.taskId,tabId:task.tabId,phase,platform:task.platform});}
 async function launch(task: Task, owner: chrome.runtime.Port) {
   try {
-    stage(task,'wait_tab_loaded');
-    await loaded(task.tabId,task.videoAlreadyTransferred?'https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page':undefined);
-    if (!isActive(task.status) || controller !== owner) return;
     const platform = platforms.find(item => item.id === task.platform)!;
+    stage(task,'wait_tab_loaded');
+    await loaded(task.tabId,platform.origin,task.videoAlreadyTransferred?'https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page':undefined);
+    if (!isActive(task.status) || controller !== owner) return;
     stage(task,'read_tab');
     const tab = await chrome.tabs.get(task.tabId);
     if (!tab.url || new URL(tab.url).origin !== platform.origin) throw new Error('页面已跳转，请先登录并检查；本次不会继续');

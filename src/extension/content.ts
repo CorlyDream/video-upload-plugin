@@ -6,7 +6,7 @@ import type { PageCommand } from '../core/protocol';
 import { hasPublication, normalizePublication } from '../core/publication';
 import { fillXiaohongshu } from './xiaohongshu';
 import { fillKuaishou } from './kuaishou';
-import { fillWeixin } from './weixin';
+import { fillWeixin, openWeixinUploadEntry, weixinSearchRoots } from './weixin';
 import { fillBilibili } from './bilibili';
 
 // Re-injection must never attach a second executor to the same document.
@@ -23,14 +23,17 @@ if (!scope.__videoUploadM0) {
     let channel: MessagePort | undefined;
     let expectedClaim: string | undefined;
     let deadline: ReturnType<typeof setTimeout> | undefined;
+    let inspectTimer: ReturnType<typeof setInterval> | undefined;
     let observer: MutationObserver | undefined;
     let initialUrl = '';
     let allowUploadTransition = false;
+    let uploadEntryOpened = false;
     const navigation = (window as Window & { navigation?: EventTarget }).navigation;
     const clean = () => {
       stopped = true;
       cancellation.abort();
       clearTimeout(deadline);
+      clearInterval(inspectTimer);
       observer?.disconnect();
       navigation?.removeEventListener('navigate', navigating);
       window.removeEventListener('popstate', navigating);
@@ -72,16 +75,14 @@ if (!scope.__videoUploadM0) {
           return element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden' && !element.disabled && accept !== '.txt' && /video|\.mp4|\.mov|\.webm/.test(accept) && !element.files?.length;
         });
       }
-      const roots: ParentNode[] = [document];
-      if (task?.platform === 'weixin') for (const frame of document.querySelectorAll<HTMLIFrameElement>('iframe')) if (frame.contentDocument) roots.push(frame.contentDocument);
+      const roots: ParentNode[] = task?.platform === 'weixin' ? weixinSearchRoots(document) : [document];
       return roots.flatMap(root => [...root.querySelectorAll<HTMLInputElement>('input[type="file"]')]).filter(element => {
         const accept = element.accept.toLowerCase();
         return !element.disabled && /video|\.mp4|\.mov|\.webm/.test(accept) && !element.files?.length;
       });
     }
     function hasExistingContent() {
-      const roots: ParentNode[] = [document];
-      if (task?.platform === 'weixin') for (const frame of document.querySelectorAll<HTMLIFrameElement>('iframe')) if (frame.contentDocument) roots.push(frame.contentDocument);
+      const roots: ParentNode[] = task?.platform === 'weixin' ? weixinSearchRoots(document) : [document];
       return roots.flatMap(root => [...root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input:not([type="file"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),textarea')])
         .some(element => (element instanceof HTMLTextAreaElement || ['text', 'search', 'url'].includes(element.type)) && element.value.trim())
         || roots.flatMap(root => [...root.querySelectorAll('[contenteditable="true"]')]).some(element => element.textContent?.trim())
@@ -114,9 +115,7 @@ if (!scope.__videoUploadM0) {
           let reason='文件已交给页面控件；尚未核验平台上传完成，请打开页面检查。';
           if (!stopped && task?.platform === 'weixin') {
             clearTimeout(deadline);
-            const frame = [...document.querySelectorAll<HTMLIFrameElement>('iframe')].find(item => item.contentDocument?.querySelector('input[placeholder="填写短标题有机会获得更多流量"]'));
-            if (!frame?.contentDocument) throw new Error('未找到视频号编辑器');
-            reason = await fillWeixin(frame.contentDocument, normalizePublication(task.publication, false), {
+            reason = await fillWeixin(document, normalizePublication(task.publication, false), {
               signal:cancellation.signal, progress:(reason,stage)=>report('transferring', reason, stage),
               edit(action) { ownSynchronousEdit = true; try { action(); } finally { ownSynchronousEdit = false; } },
             });
@@ -168,11 +167,16 @@ if (!scope.__videoUploadM0) {
       const inspect = () => {
         if (stopped) return;
         if (!task?.videoAlreadyTransferred && hasExistingContent()) { report('needs_attention', '页面已有内容或素材，为保护原稿已停止'); clean(); return; }
-        const inputs = candidates();
+        let inputs = candidates();
+        if (!task?.videoAlreadyTransferred && task?.platform === 'weixin' && !inputs.length && !uploadEntryOpened) {
+          uploadEntryOpened = openWeixinUploadEntry(document);
+          if (uploadEntryOpened) inputs = candidates();
+        }
         if (!task?.videoAlreadyTransferred && inputs.length > 1) { report('needs_attention', '发现多个视频入口，无法确认目标，已停止'); clean(); return; }
         if (!task?.videoAlreadyTransferred && !inputs.length) return;
         input = inputs[0];
         observer?.disconnect();
+        clearInterval(inspectTimer);
         report('transferring', task?.videoAlreadyTransferred ? '正在接续抖音编辑页；不会重复上传' : '正在交接素材；不代表上传完成', task?.videoAlreadyTransferred ? 'upload' : 'transfer');
         window.addEventListener('message', onBridge);
         iframe = document.createElement('iframe');
@@ -182,6 +186,10 @@ if (!scope.__videoUploadM0) {
       };
       observer = new MutationObserver(inspect);
       observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['accept', 'disabled'] });
+      // Shadow-root mutations do not bubble to a document observer. Poll the
+      // search roots as well so controls created asynchronously after the
+      // upload card is opened are still discovered.
+      inspectTimer = setInterval(inspect, 250);
       inspect();
     });
     port.onDisconnect.addListener(clean);
