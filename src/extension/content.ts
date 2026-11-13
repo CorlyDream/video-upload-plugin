@@ -115,10 +115,12 @@ if (!scope.__videoUploadM0) {
           let reason='文件已交给页面控件；尚未核验平台上传完成，请打开页面检查。';
           if (!stopped && task?.platform === 'weixin') {
             clearTimeout(deadline);
+            if (task.coverAssetId && (asset.cover?.id !== task.coverAssetId || asset.cover.batchId !== task.batchId)) throw new Error('封面身份不匹配');
+            if ((task.pkCoverAssetIds ?? []).length !== (asset.pkCovers ?? []).length || (task.pkCoverAssetIds ?? []).some((id,index)=>asset.pkCovers[index]?.id !== id || asset.pkCovers[index]?.batchId !== task!.batchId)) throw new Error('PK 封面身份不匹配');
             reason = await fillWeixin(document, normalizePublication(task.publication, false), {
               signal:cancellation.signal, progress:(reason,stage)=>report('transferring', reason, stage),
               edit(action) { ownSynchronousEdit = true; try { action(); } finally { ownSynchronousEdit = false; } },
-            });
+            }, asset.cover, asset.pkCovers ?? []);
           } else if (!stopped && task?.platform === 'bilibili' && hasPublication(task.publication)) {
             clearTimeout(deadline);
             reason = await fillBilibili(document, normalizePublication(task.publication, false), {
