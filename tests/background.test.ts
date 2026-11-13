@@ -185,6 +185,14 @@ describe('worker lifecycle races', () => {
     const retried=retriedSnapshot.tasks[0];
     expect(retried.taskId).toBe(originalTaskId);
     expect(retried.attemptId).not.toBe(originalAttemptId);
+    expect(retried.documentId).toBe('');
+    expect(retried.step).toBe(0);
+    expect(retried.pipelineStage).toBe('page');
+    expect(retried.status).toBe('checking');
+    expect(retried.reason).toBe('等待页面加载并检查唯一视频入口');
+    expect(retried.diagnosticPhase).toBe('wait_tab_loaded');
+    expect(retried.videoAlreadyTransferred).toBeUndefined();
+    expect(retried.uploadTabId).toBeUndefined();
     expect(retried.coverAssetId).toBe(task.coverAssetId);expect(retried.pkCoverAssetIds).toEqual(task.pkCoverAssetIds);
     wb.disconnect();await settle();
   });
