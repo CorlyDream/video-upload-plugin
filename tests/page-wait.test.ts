@@ -1,5 +1,5 @@
 import {afterEach,expect,it,vi} from 'vitest';
-import {waitFor} from '../src/extension/xiaohongshu';
+import {isUploadPreviewReady,waitFor} from '../src/extension/xiaohongshu';
 afterEach(()=>{vi.useRealTimers();vi.unstubAllGlobals();});
 it('allows a cover result arriving after the old 30 second limit',async()=>{
  vi.useFakeTimers();let ready=false;
@@ -18,6 +18,11 @@ it('still cancels immediately during the extended wait',async()=>{
  const result=waitFor(()=>undefined,controller.signal,120000);
  const failure=expect(result).rejects.toThrow('操作已停止');
  controller.abort();await failure;expect(vi.getTimerCount()).toBe(0);
+});
+it('accepts an upload preview whose busy attribute is absent after processing',()=>{
+ const preview={getAttribute:(name:string)=>name==='aria-busy'?null:null};
+ expect(isUploadPreviewReady(preview)).toBe(true);
+ expect(isUploadPreviewReady({getAttribute:()=> 'true'})).toBe(false);
 });
 it('pauses cover deadline while hidden and resumes without repeating completed work',async()=>{
  vi.useFakeTimers();const page=new EventTarget();let visible=false;

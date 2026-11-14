@@ -12,6 +12,7 @@
     "test:feedback": "node tests/browser.mjs --start-feedback",
     "test:kuaishou": "node tests/kuaishou-browser.mjs",
     "test:douyin": "node tests/douyin-browser.mjs",
+    "test:xiaohongshu": "node tests/xiaohongshu-browser.mjs",
     "test:weixin": "node tests/weixin-browser.mjs",
     "test:bilibili": "node tests/bilibili-browser.mjs",
     "test:downloads": "node tests/downloads-browser.mjs"

@@ -6,12 +6,14 @@ const code=(Array.isArray(bundle)?bundle[0]:bundle).output.find(f=>f.type==='chu
 const browser=await chromium.launch({headless:true});
 try{for(const mode of ['success','existing','rollback','wrong-image','cancel']){
  const page=await browser.newPage();
- await page.setContent(`<input placeholder="填写作品标题，为作品获得更多流量"><div contenteditable="true" data-slate-editor="true" data-placeholder="添加作品简介"><div class="ace-line"><div data-line-wrapper="true">${mode==='existing'?'原稿':'\u200b'}</div></div></div><div>重新上传</div>
+ await page.setContent(`<input placeholder="填写作品标题，为作品获得更多流量"><div contenteditable="true" data-slate-editor="true" data-placeholder="添加作品简介"><div class="ace-line"><div data-line-wrapper="true">${mode==='existing'?'原稿':'\u200b'}</div></div></div><div>重新上传</div><div id="declaration">请选择自主声明</div><div id="collection"><span id="collection-trigger">请选择合集</span></div><label><span>定时发布</span><input type="checkbox" value="1"></label><input class="semi-input" placeholder="日期和时间">
  <div class="coverControl-test"><div class="cover-test">选择封面</div><span>横封面4:3</span><img></div><div class="coverControl-test"><div class="cover-test">选择封面</div><span>竖封面3:4</span><img></div><button id="publish">发布</button><button id="draft">暂存离开</button>`);
  await page.evaluate(mode=>{
-  window.confirms=0;window.submissions=0;window.names=[];
+  window.confirms=0;window.submissions=0;window.names=[];window.collectionClicks=0;
   document.querySelector('#publish').onclick=document.querySelector('#draft').onclick=()=>window.submissions++;
   document.querySelector('[contenteditable]').addEventListener('paste',e=>{e.preventDefault();const editor=e.currentTarget;editor.replaceChildren();for(const line of e.clipboardData.getData('text/plain').split('\n')){const div=document.createElement('div');div.dataset.lineWrapper='true';div.textContent=line||'\u200b';editor.append(div);}editor.dispatchEvent(new Event('input',{bubbles:true}));});
+  document.querySelector('#declaration').onclick=()=>{const dialog=document.createElement('div');dialog.className='semi-modal-content';dialog.innerHTML='<div>请选择声明类型</div><label class="semi-radio"><span class="semi-radio-addon">内容由AI生成</span></label><button>确定</button>';document.body.append(dialog);dialog.querySelector('button').onclick=()=>dialog.remove();};
+  document.querySelector('#collection-trigger').onclick=()=>{window.collectionClicks++;const option=document.createElement('div');option.setAttribute('role','option');option.textContent='英语启蒙合集';option.onclick=()=>{document.querySelector('#collection-trigger').textContent='英语启蒙合集';option.remove();};document.body.append(option);};
   if(mode==='rollback')document.querySelector('[contenteditable]').oninput=()=>setTimeout(()=>document.querySelector('[contenteditable]').textContent='平台回滚',0);
   document.querySelectorAll('[class^=coverControl-]').forEach((card,index)=>card.querySelector('.cover-test').onclick=()=>{
    const modal=document.createElement('div');modal.className='dy-creator-content-modal-body';modal.innerHTML='<div class="step-test"><span>设置横封面</span></div><div class="step-test"><span>设置竖封面</span></div><div class="upload-tips-test"></div><div class="semi-upload"><input type="file" class="semi-upload-hidden-input" style="display:none"></div><div class="notImg-test" style="display:none"></div><button>完成</button>';
@@ -30,11 +32,11 @@ try{for(const mode of ['success','existing','rollback','wrong-image','cancel']){
   const make=async(w,h,name)=>{const c=document.createElement('canvas');c.width=w;c.height=h;const ctx=c.getContext('2d');ctx.fillStyle='red';ctx.fillRect(0,0,w,h);const blob=await new Promise(r=>c.toBlob(r));return {blob,name,type:'image/png'};};
   const cover=await make(40,30,'horizontal.png'),portrait=await make(30,40,'vertical.png');
   const abort=new AbortController();if(mode==='cancel')abort.abort();const timer=setTimeout(()=>abort.abort(),mode==='wrong-image'?2200:6500);
-  try{return {reason:await dy.fillDouyin({title:'小熊洗脸',description:'一起学英语\nWash your face!',tags:['亲子英语']},cover,{signal:abort.signal,edit:fn=>fn(),progress:()=>{}},[portrait])};}catch(e){return {error:e.message};}finally{clearTimeout(timer);}
+  try{return {reason:await dy.fillDouyin({title:mode==='success'?'英语启蒙合集':'小熊洗脸',description:'一起学英语\nWash your face!',tags:['亲子英语'],collection:mode==='success'?'英语启蒙合集':'',scheduleAt:mode==='success'?'2026-11-15T12:30':undefined},cover,{signal:abort.signal,edit:fn=>fn(),progress:()=>{}},[portrait])};}catch(e){return {error:e.message};}finally{clearTimeout(timer);}
  },mode);
- const state=await page.evaluate(()=>({confirms,submissions,names,title:document.querySelector('input').value,body:document.querySelector('[contenteditable]').textContent}));
+ const state=await page.evaluate(()=>({confirms,submissions,names,collectionClicks,collection:document.querySelector('#collection-trigger').textContent,title:document.querySelector('input').value,body:document.querySelector('[contenteditable]').textContent}));
  assert.equal(state.submissions,0);
- if(mode==='success'){assert.match(result.reason,/已回读核验/);assert.equal(state.confirms,2);assert.deepEqual(state.names,['horizontal.png','vertical.png']);}
+if(mode==='success'){assert.match(result.reason,/已回读核验/);assert.match(result.reason,/AI 生成声明/);assert.match(result.reason,/已选择抖音合集/);assert.match(result.reason,/定时发布时间/);assert.equal(state.collectionClicks,1);assert.equal(state.collection,'英语启蒙合集');assert.equal(state.confirms,2);assert.deepEqual(state.names,['horizontal.png','vertical.png']);}
  else {assert.ok(result.error,JSON.stringify(result));assert.equal(state.confirms,0);}
  console.log('DOUYIN',mode,JSON.stringify(result));await page.close();
 }}finally{await browser.close();}

@@ -7,7 +7,7 @@ const browser=await chromium.launch({headless:true});
 try {
 for(const mode of ['success','scaled-preview','rollback','existing','wrong-image','takeover','no-cover']){
  const page=await browser.newPage();
- await page.setContent(`<div id="work-description-edit" contenteditable="true">${mode==='existing'?'原稿':''}</div><p>重新上传</p>
+ await page.setContent(`<div id="work-description-edit" contenteditable="true">${mode==='existing'?'原稿':''}</div><p>重新上传</p><label><span>定时发布</span><input type="radio" value="2"></label><input class="ant-picker-input" value="2026-11-14 12:48">
  <div class="_high-cover-editor_test"><div class="_default-cover_test"><div class="_cover-full-editor_test">封面设置</div><img></div><button role="switch" aria-checked="false">PK封面</button><div class="_pk-upload_test">PK封面</div></div>
  <button id="publish">发布</button><button id="draft">存草稿</button>`);
  await page.evaluate(mode=>{
@@ -48,13 +48,13 @@ for(const mode of ['success','scaled-preview','rollback','existing','wrong-image
   if(mode==='takeover')abort.abort();
   const deadline=setTimeout(()=>abort.abort(),5000);
   if(mode==='wrong-image')setTimeout(()=>abort.abort(),1800);
-  try{return {reason:await ks.fillKuaishou({title:'标题',description:'正文绝不填写',tags:['一','二','三','四','五']},mode==='no-cover'?undefined:asset(0),{signal:abort.signal,edit:fn=>fn(),progress:(_,s)=>stages.push(s)},mode==='no-cover'?[]:[asset(1),asset(2),asset(3)],true),stages};}
+  try{return {reason:await ks.fillKuaishou({title:'标题',description:'正文绝不填写',tags:['一','二','三','四','五'],scheduleAt:mode==='success'?'2026-11-15T12:30':undefined},mode==='no-cover'?undefined:asset(0),{signal:abort.signal,edit:fn=>fn(),progress:(_,s)=>stages.push(s)},mode==='no-cover'?[]:[asset(1),asset(2),asset(3)],true),stages};}
   catch(e){return {error:e.message,stages};}finally{clearTimeout(deadline);}
  },mode);
  const state=await page.evaluate(()=>({text:document.querySelector('#work-description-edit').innerText,submissions,coverNames,confirms}));
  assert.equal(state.submissions,0);
  if(mode==='success'||mode==='scaled-preview'){
-  assert.match(result.reason,/作品描述已回读核验/);assert.equal(state.text,'标题\n#一 #二 #三 #四');
+  assert.match(result.reason,/作品描述已回读核验/);if(mode==='success')assert.match(result.reason,/定时发布时间/);assert.equal(state.text,'标题\n#一 #二 #三 #四');
   assert.deepEqual(state.coverNames,['cover-0.png','cover-1.png']);assert.equal(state.confirms,2);assert.ok(result.stages.includes('cover-1-confirm'));
  }else if(mode==='no-cover'){assert.match(result.reason,/保留平台默认封面/);assert.equal(state.confirms,0);}
  else {assert.ok(result.error,mode);assert.equal(state.confirms,0);}

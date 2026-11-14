@@ -11,11 +11,17 @@ void diagnostics.record('page.loaded');
 import { requestPermission } from '../core/permission-wait';
 import { keepConnectionAlive } from '../core/connection';
 import { inspectCover } from '../core/covers';
-import { normalizePublication, normalizeDouyinPublication, parseTags } from '../core/publication';
+import { normalizePublication, normalizeDouyinPublication, parseTags, scheduleWindowMs } from '../core/publication';
 import { coverPkEnabled, flattenCovers, splitCovers } from '../core/cover-order';
+import { readStoredCollection, readStoredTags, restoreCollection, restoreTags, writeStoredCollection, writeStoredTags } from '../core/tag-storage';
 import { CoverPreviewList } from './CoverPreviewList';
 
 const labels: Record<TaskStatus, string> = { checking: '检查页面', transferring: '传递文件', needs_attention: '需你处理', paused: '已暂停', aborted: '已中止', failed: '失败' };
+function localDateTimeValue(offsetMs: number) {
+  const date = new Date(Date.now() + offsetMs);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 function App() {
   const [batch, setBatch] = useState<Batch>();
   const [selected, setSelected] = useState<PlatformId[]>(() => platforms.map(platform => platform.id));
@@ -31,6 +37,8 @@ function App() {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [tags, setTags] = useState('');
+  const [collection, setCollection] = useState('');
+  const [scheduleAt, setScheduleAt] = useState('');
   const [cover, setCover] = useState<Batch['cover']>();
   const [pkCovers,setPkCovers] = useState<NonNullable<Batch['pkCovers']>>([]);
   const port = useRef<chrome.runtime.Port | null>(null);
@@ -45,7 +53,7 @@ function App() {
     latest.current = snapshot.batch; setBatch(snapshot.batch);
     if (changed || !snapshot.batch) {
       setTitle(snapshot.batch?.publication?.title ?? ''); setDescription(snapshot.batch?.publication?.description ?? '');
-      setTags(snapshot.batch?.publication?.tags.join(',') ?? ''); setCover(snapshot.batch?.cover); setPkCovers(snapshot.batch?.pkCovers ?? []);
+      setTags(restoreTags(snapshot.batch?.publication, readStoredTags())); setCollection(restoreCollection(snapshot.batch?.publication, readStoredCollection())); setScheduleAt(snapshot.batch?.publication?.scheduleAt ?? ''); setCover(snapshot.batch?.cover); setPkCovers(snapshot.batch?.pkCovers ?? []);
     }
     const last=snapshot.batch?.tasks.at(-1);
     if(last?.status==='needs_attention' && last.step===0)setError(last.reason);
@@ -109,14 +117,19 @@ function App() {
     if (!files.length || !batch || metadataLocked) return;
     setBusy(true); setError('');
     try {
-      if (files.length > 4) throw new Error('最多选择 4 张封面（1 张主封面 + 3 张 PK）');
+      // Each file-picker action adds to the current ordered list. The first
+      // selected image remains the main cover; later images become PK covers.
+      const existing = flattenCovers(cover, pkCovers);
+      const total = existing.length + files.length;
+      if (total > 4) throw new Error('最多选择 4 张封面（1 张主封面 + 3 张 PK）');
       for (const file of files) {
       if (!['image/jpeg','image/png','image/webp'].includes(file.type) || !file.size || file.size > 20*1024*1024) throw new Error('封面支持 JPG、PNG、WebP，最大 20 MiB');
-      if (files.length > 1 && !['image/jpeg','image/png'].includes(file.type)) throw new Error('多封面请选择 JPG 或 PNG');
+      if (total > 1 && !['image/jpeg','image/png'].includes(file.type)) throw new Error('多封面请选择 JPG 或 PNG');
       await inspectCover(file);
       }
       const assets = await Promise.all(files.map(file=>saveAsset(batch.id,file)));
-      setCover(assets[0]); setPkCovers(assets.slice(1));
+      const next = [...existing, ...assets];
+      setCover(next[0]); setPkCovers(next.slice(1));
     } catch (error) { setError((error as Error).message); }
     finally { setBusy(false); }
   }
@@ -161,10 +174,12 @@ function App() {
     const targets = platforms.filter(item => selected.includes(item.id) && !batch?.tasks.some(task => task.platform === item.id));
     try {
       if (!targets.length) throw new Error('所选平台均已尝试，请检查原页面');
-      const publication = normalizePublication({title, description, tags: parseTags(tags)}, false);
-      if (targets.some(p=>p.id === 'xiaohongshu')) normalizePublication(publication);
-      if (targets.some(p=>p.id === 'douyin')) normalizeDouyinPublication(publication);
-      if (targets.some(p=>!['xiaohongshu','kuaishou','douyin','weixin','bilibili'].includes(p.id)) && (title || description || publication.tags.length || cover)) throw new Error('文案和封面自动填写目前仅支持小红书、快手、抖音、视频号和 B 站');
+      const publicationWithSchedule = normalizePublication({title, description, tags: parseTags(tags), collection, scheduleAt: scheduleAt || undefined}, false);
+      if (targets.some(p=>p.id === 'xiaohongshu')) normalizePublication(publicationWithSchedule);
+      if (targets.some(p=>p.id === 'douyin')) normalizeDouyinPublication(publicationWithSchedule);
+      if (targets.some(p=>!['xiaohongshu','kuaishou','douyin','weixin','bilibili'].includes(p.id)) && (title || description || publicationWithSchedule.tags.length || publicationWithSchedule.collection || publicationWithSchedule.scheduleAt || cover)) throw new Error('文案、合集、定时发布时间和封面自动填写目前仅支持小红书、快手、抖音、视频号和 B 站');
+      writeStoredTags(publicationWithSchedule.tags.join(','));
+      writeStoredCollection(publicationWithSchedule.collection ?? '');
       // Request optional hosts directly from the user gesture, before any asynchronous work.
       setStartPhase('正在等待浏览器站点授权，请查看权限提示…');
       const cancellation = new AbortController(); permissionWait.current = cancellation;
@@ -174,7 +189,7 @@ function App() {
       void diagnostics.record('permission.result',{result:allowed});
       if (!allowed) throw new Error('未授权访问所选平台');
       setStartPhase('正在保存本次填写内容并打开平台…');
-      if (!batch?.tasks.length) await request({type:'configure', publication, coverAssetId:cover?.id, pkCoverAssetIds:pkCovers.map(c=>c.id), coverPk:targets.some(p=>['xiaohongshu','kuaishou','douyin'].includes(p.id)) && coverPkEnabled(pkCovers) ? true : undefined});
+      if (!batch?.tasks.length) await request({type:'configure', publication: publicationWithSchedule, coverAssetId:cover?.id, pkCoverAssetIds:pkCovers.map(c=>c.id), coverPk:coverPkEnabled(pkCovers) ? true : undefined});
       for (const target of targets) {
         if (stopped.current) break;
         try { await request({ type: 'start', platform: target.id }); setStartPhase('任务已开始，请查看平台记录；等待上传和填写完成…'); await waitForHandoff(); }
@@ -206,7 +221,7 @@ function App() {
   }
   return <main>
     <header><div className="brand">视频上传工作台</div><span className="edition">多平台填表实验版</span></header>
-    <section className="intro"><h1>上传、填表，最后由你检查。</h1><p>小红书、抖音和视频号填写标题、正文和标签；快手作品描述仅用标题，换行后填写前 4 个标签；B 站填写标题和简介。平台话题与裁剪结果需要你确认。</p></section>
+    <section className="intro"><h1>上传、填表，最后由你检查。</h1><p>小红书、抖音和视频号填写标题、正文和标签；快手作品描述仅用标题，换行后填写前 4 个标签；B 站填写标题、简介、平台标签和单张封面。平台有合集或定时控件时会按名称或时间填写并回读；没有对应控件的平台会跳过。平台话题与裁剪结果需要你确认。</p></section>
     <div className="workspace">
       <section className="source" aria-labelledby="source-title"><h2 id="source-title">本次素材</h2>
         <label className="file-picker"><span>{batch ? batch.asset.name : '选择本地视频'}</span>
@@ -219,11 +234,15 @@ function App() {
           <label>内容描述<textarea aria-label="内容描述" rows={5} value={description} onChange={e=>setDescription(e.target.value)} placeholder="小红书正文与标签合计最多 1000 字；快手不使用正文" /></label>
           <label>标签<textarea aria-label="标签" rows={2} value={tags} onChange={e=>setTags(e.target.value)} placeholder="逗号、换行或 # 分隔；小红书最多 10 个，快手取前 4 个" /></label>
           <p className="hint">标签将以 #标签 文本填入正文；平台话题候选需要你确认。留空的字段不填写。</p>
+          <label>合集名称（平台支持时）<input aria-label="合集名称" value={collection} onChange={e=>setCollection(e.target.value)} placeholder="填写后按名称选择平台已有合集" /></label>
+          <p className="hint">支持合集的平台会查找名称完全相同的已有合集并回读选择结果；没有合集控件的平台会跳过。</p>
+          <label>定时发布时间（平台支持时）<span className="schedule-controls"><input aria-label="定时发布时间" type="datetime-local" value={scheduleAt} min={localDateTimeValue(60_000)} max={localDateTimeValue(scheduleWindowMs)} onChange={e=>setScheduleAt(e.target.value)} /><button type="button" onClick={()=>setScheduleAt('')} disabled={!scheduleAt}>清理定时</button></span></label>
+          <p className="hint">有定时控件的平台会设置并回读日期和时间；没有对应控件的平台会跳过。只能设置未来 7 天内的时间。仍需你最后检查并点击发布；清理后不会设置定时发布。</p>
           <label>可选封面<input aria-label="选择封面图片" type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={e=>{void chooseCover(Array.from(e.target.files ?? []));e.target.value='';}} /></label>
           <CoverPreviewList items={flattenCovers(cover, pkCovers)} disabled={metadataLocked} onChange={updateCoverOrder} />
-          <p className="hint">最多 4 张。小红书按选择顺序第一张为主封面，其余为 PK 候选；选择多张时自动开启 PK。只支持 4:3 和 3:4。快手两种比例各取一张；只有一种比例时随机取两张（只有一张则用一张），重试沿用所选图片。抖音按横/竖比例各取第一张，没有的比例保留平台默认。不选择时保留平台默认封面。自定义封面使用平台默认裁剪，遇到额外裁剪步骤时交给你处理。</p>
+          <p className="hint">最多 4 张。第一次选择的图片自动作为主封面，之后继续选择的图片会按顺序追加为 PK 候选；不需要单独开启开关。只支持 4:3 和 3:4。快手两种比例各取一张；只有一种比例时随机取两张（只有一张则用一张），重试沿用所选图片。抖音按横/竖比例各取第一张，没有的比例保留平台默认。不选择时保留平台默认封面。自定义封面使用平台默认裁剪，遇到额外裁剪步骤时交给你处理。</p>
         </fieldset>
-        <h2>目标平台</h2><p className="hint">小红书、快手、抖音、视频号和 B 站支持实验性填表，其余平台仅交接视频；均需在原页面检查。</p><p className="hint">快手、抖音默认禁止他人下载/保存。小红书、视频号和 B 站暂未找到对应开关，会提示人工检查。</p>
+        <h2>目标平台</h2><p className="hint">小红书、快手、抖音、视频号和 B 站支持实验性填表，其余平台仅交接视频；均需在原页面检查。支持 PK 的平台会使用全部封面；不支持 PK 的平台只使用第一张主封面。</p><p className="hint">快手、抖音默认禁止他人下载/保存。小红书、视频号和 B 站暂未找到对应开关，会提示人工检查。</p>
         <fieldset disabled={running || active || busy}><legend className="sr-only">选择目标平台</legend>
           {platforms.map(platform => <label className="platform" key={platform.id}>
             <input type="checkbox" checked={selected.includes(platform.id)} onChange={event => { const checked = event.currentTarget.checked; setSelected(ids => checked ? [...ids, platform.id] : ids.filter(id => id !== platform.id)); }} />

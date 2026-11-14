@@ -5,10 +5,13 @@ export interface ProgressStep {id:string;label:string;state:StepState}
 export function taskProgress(task:Task):{steps:ProgressStep[];current:ProgressStep} {
  const plan=[{id:'page',label:'打开并检查页面'},{id:'transfer',label:'交接视频文件'}];
  const supported=['xiaohongshu','kuaishou','douyin','weixin','bilibili'].includes(task.platform);
- const fill=supported && (hasPublication(task.publication)||task.coverAssetId||task.coverPk!==undefined);
+ const fill=supported && (hasPublication(task.publication)||task.publication?.collection||task.publication?.scheduleAt||task.coverAssetId||task.coverPk!==undefined);
  if(fill){
-  plan.push({id:'upload',label:'等待视频上传与处理'},{id:'copy',label:task.platform==='kuaishou'?'填写并核验作品描述（标题和标签）':task.platform==='weixin'?'填写并核验短标题和视频描述':task.platform==='bilibili'?'填写并核验标题和简介':'填写并核验标题、正文和标签'});
+  plan.push({id:'upload',label:'等待视频上传与处理'},{id:'copy',label:task.platform==='kuaishou'?'填写并核验作品描述（标题和标签）':task.platform==='weixin'?'填写并核验短标题和视频描述':task.platform==='bilibili'?'填写并核验标题、简介和标签':'填写并核验标题、正文和标签'});
   if(task.coverPk!==undefined)plan.push({id:'pk',label:task.coverPk?'开启封面 PK':'关闭封面 PK'});
+  plan.push({id:'declaration',label:'设置原创 / AI 生成声明'});
+  if((task.platform==='douyin' || task.platform==='xiaohongshu') && task.publication?.collection)plan.push({id:'collection',label:`选择并核验${task.platform==='douyin'?'抖音':'小红书'}合集`});
+  if(task.publication?.scheduleAt)plan.push({id:'schedule',label:task.platform==='xiaohongshu'?'设置并核验定时发布时间':`设置并核验${task.platform==='douyin'?'抖音':task.platform==='kuaishou'?'快手':task.platform==='weixin'?'视频号':'B 站'}定时发布时间`});
   const count=task.coverAssetId?1+(task.platform==='kuaishou'?(task.coverPk?Math.min(1,task.pkCoverAssetIds?.length??0):0):(task.pkCoverAssetIds?.length??0)):0;
   for(let i=0;i<count;i++)for(const [suffix,label] of [['open','打开编辑器'],['baseline','等待原预览就绪'],['upload','上传与校验'],['confirm','确认封面结果']])
    plan.push({id:`cover-${i}-${suffix}`,label:`封面 ${i+1}/${count} · ${label}`});

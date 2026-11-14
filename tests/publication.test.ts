@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { normalizePublication, publicationBody, kuaishouDescription, parseTags } from '../src/core/publication';
+import { normalizePublication, publicationBody, kuaishouDescription, parseTags, hasPublication, scheduleWindowMs } from '../src/core/publication';
 
 it('parses comma, line and hash separated tags with surrounding spaces', () => {
   expect(parseTags(' #趣味英语动画#情景英语 #生活英语\n亲子英语, 早教益智启蒙 ')).toEqual([
@@ -22,6 +22,25 @@ it('rejects invalid or too long values instead of truncating user content', () =
 });
 it('defaults old batches to an empty publication', () => {
   expect(normalizePublication(undefined)).toEqual({title:'',description:'',tags:[]});
+});
+
+it('keeps a trimmed optional collection name without changing shared copy', () => {
+  expect(normalizePublication({collection:'  英语启蒙合集  '})).toEqual({title:'',description:'',tags:[],collection:'英语启蒙合集'});
+  expect(normalizePublication({collection:'   '})).toEqual({title:'',description:'',tags:[]});
+  expect(() => normalizePublication({collection:3} as never)).toThrow(/文案/);
+});
+it('keeps a future schedule time and rejects malformed or past values', () => {
+  const localValue = (offset: number) => {
+    const date = new Date(Date.now() + offset);
+    const pad = (value: number) => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  };
+  const withinWindow = localValue(2 * 24 * 60 * 60 * 1000);
+  expect(normalizePublication({scheduleAt:withinWindow}).scheduleAt).toBe(withinWindow);
+  expect(() => normalizePublication({scheduleAt:'2099-1-2T3:04'})).toThrow(/格式/);
+  expect(() => normalizePublication({scheduleAt:'2000-01-02T03:04'})).toThrow(/晚于/);
+  expect(() => normalizePublication({scheduleAt:localValue(scheduleWindowMs + 24 * 60 * 60 * 1000)})).toThrow(/7 天/);
+  expect(hasPublication({title:'',description:'',tags:[],scheduleAt:withinWindow})).toBe(true);
 });
 
 it('uses only the title and first four tags for Kuaishou without changing the shared copy', () => {

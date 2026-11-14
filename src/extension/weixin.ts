@@ -2,6 +2,7 @@ import {publicationBody, type Publication} from '../core/publication';
 import {inspectCover, type CoverRatio} from '../core/covers';
 import type {Asset} from '../core/model';
 import type {FillContext} from './xiaohongshu';
+import {ensureChecked, findDeclarationControl, findDeclarationText} from './declarations';
 
 function visible(element: Element) { return element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden'; }
 function textOf(element: HTMLElement) { return (element.innerText || element.textContent || '').replace(/\u200b/g, '').replace(/\r\n/g, '\n').replace(/\n+$/, ''); }
@@ -50,7 +51,7 @@ export function openWeixinUploadEntry(documentRoot: Document): boolean {
 
 function leaf(root: ParentNode, text: string): HTMLElement | undefined {
   return [...root.querySelectorAll<HTMLElement>('*')]
-    .filter(element => visible(element) && element.textContent?.trim() === text)
+    .filter(element => visible(element) && element.textContent?.replace(/\s+/g, '') === text.replace(/\s+/g, ''))
     .sort((a, b) => a.children.length - b.children.length)[0];
 }
 
@@ -69,14 +70,19 @@ function coverCard(documentRoot: Document, ratio: CoverRatio): {edit: HTMLElemen
     let ancestor: HTMLElement | null = marker.parentElement;
     for (let depth = 0; ancestor && depth < 6; depth++, ancestor = ancestor.parentElement) {
       const edit = button(ancestor, '编辑');
-      if (edit) return {edit, image: ancestor.querySelector<HTMLImageElement>('img') ?? undefined};
+      if (edit) {
+        // Edit remains visible while Channels is still generating video frames,
+        // but its handler ignores clicks until this blocking mask disappears.
+        if ([...ancestor.querySelectorAll('.vertical-mask-layer,.horizon-mask-layer')].some(visible)) return undefined;
+        return {edit, image: ancestor.querySelector<HTMLImageElement>('img') ?? undefined};
+      }
     }
   }
   return undefined;
 }
 
 function coverModal(documentRoot: Document, ratio: CoverRatio): HTMLElement | undefined {
-  const title = leaf(documentRoot, `编辑${ratio === '3:4' ? '个人主页卡片' : '分享卡片'}`);
+  const title = weixinSearchRoots(documentRoot).map(root => leaf(root, `编辑${ratio === '3:4' ? '个人主页卡片' : '分享卡片'}`)).find(Boolean);
   if (!title) return undefined;
   let ancestor: HTMLElement | null = title.parentElement;
   for (let depth = 0; ancestor && depth < 8; depth++, ancestor = ancestor.parentElement) {
@@ -85,26 +91,97 @@ function coverModal(documentRoot: Document, ratio: CoverRatio): HTMLElement | un
   return undefined;
 }
 
-async function fillWeixinCover(documentRoot: Document, ratio: CoverRatio, asset: Asset, ctx: FillContext): Promise<void> {
+export type WeixinCoverAction = 'open' | 'direct' | 'upload' | 'confirm';
+interface WeixinFillContext extends FillContext { activateCover?: (ratio: CoverRatio, action: WeixinCoverAction, asset?: Asset) => Promise<boolean> | boolean }
+/** Runs in the editor iframe's MAIN world; only these four cover actions are allowed. */
+export function clickWeixinCoverControl(ratio: CoverRatio, action: WeixinCoverAction, file?: {base64:string;name:string;type:string;lastModified:number} | null, root: Document | ShadowRoot = document): boolean {
+  if (!['3:4','4:3'].includes(ratio) || !['open','direct','upload','confirm'].includes(action)) return false;
+  const editor = root.querySelector<HTMLIFrameElement>('iframe[src="https://channels.weixin.qq.com/empty.html"]')?.contentDocument;
+  if (editor) root = editor;
+  const visible = (e: Element) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+  let target: HTMLElement | undefined;
+  if (action === 'open') {
+    const card = [...root.querySelectorAll<HTMLElement>(ratio === '3:4' ? '.vertical-cover-wrap' : '.horizon-cover-wrap')].find(visible);
+    if (card && [...card.querySelectorAll('.vertical-mask-layer,.horizon-mask-layer')].some(visible)) return false;
+    target = card?.querySelector<HTMLElement>('.edit-btn') ?? card;
+  } else if (action === 'direct') {
+    const recommendations = [...root.querySelectorAll<HTMLElement>('.img-recommend-wrap')].filter(visible);
+    if (recommendations.length !== 1) return false;
+    target = [...recommendations[0]!.querySelectorAll<HTMLElement>('button,[role="button"]')].find(e=>visible(e)&&e.textContent?.trim()==='直接编辑');
+  } else {
+    const title = `编辑${ratio === '3:4' ? '个人主页卡片' : '分享卡片'}`;
+    const heading = [...root.querySelectorAll<HTMLElement>('h3')].find(e=>visible(e)&&e.textContent?.trim()===title);
+    const modal = heading?.closest('.weui-desktop-dialog,.cover-modal');
+    if (action === 'upload') {
+      const input = modal?.querySelector<HTMLInputElement>('input[type="file"]');
+      if (!input || !file || !/^image\/(jpeg|png|webp)$/.test(file.type)) return false;
+      const realm = (input.ownerDocument.defaultView ?? window) as Window & typeof globalThis;
+      const bytes = Uint8Array.from(atob(file.base64), char=>char.charCodeAt(0));
+      const transfer = new realm.DataTransfer();
+      transfer.items.add(new realm.File([bytes],file.name,{type:file.type,lastModified:file.lastModified}));
+      input.files=transfer.files;
+      input.dispatchEvent(new realm.Event('input',{bubbles:true}));
+      input.dispatchEvent(new realm.Event('change',{bubbles:true}));
+      return true;
+    }
+    target = modal ? [...modal.querySelectorAll<HTMLElement>('button,[role="button"],div,span')].filter(e=>visible(e)&&e.textContent?.trim()==='确认').sort((a,b)=>a.children.length-b.children.length)[0] : undefined;
+  }
+  if (!target || (target as HTMLButtonElement).disabled) return false;
+  target.click();return true;
+}
+async function activate(ctx: WeixinFillContext, ratio: CoverRatio, action: WeixinCoverAction, target: HTMLElement, asset?: Asset) {
+  if (ctx.signal.aborted) throw new Error('操作已停止');
+  if (ctx.activateCover) { if (!await ctx.activateCover(ratio,action,asset)) throw new Error('视频号封面控件未就绪'); }
+  else ctx.edit(()=>target.click());
+}
+
+async function fillWeixinCover(documentRoot: Document, ratio: CoverRatio, asset: Asset, ctx: WeixinFillContext): Promise<void> {
   if (!(asset.blob instanceof Blob) || !asset.type.startsWith('image/')) throw new Error('视频号封面素材不可用');
   const card = await waitForWeixin(() => coverCard(documentRoot, ratio), ctx, `等待视频号 ${ratio} 封面槽位`);
   ctx.progress(`已找到视频号 ${ratio} 封面槽位`, `cover-${ratio}-open`);
   const before = card.image?.currentSrc || card.image?.src || '';
-  ctx.edit(() => card.edit.click());
-  const modal = await waitForWeixin(() => coverModal(documentRoot, ratio), ctx, `打开视频号 ${ratio} 封面编辑器`);
+  await activate(ctx,ratio,'open',card.edit);
+  let directPending=false, directError: unknown;
+  const modal = await waitForWeixin(() => {
+    if (directError) throw directError;
+    const current = coverModal(documentRoot, ratio);
+    if (current) return current;
+    // After editing one ratio, Channels recommends reusing it for the other.
+    // Choose direct editing so each slot receives its own selected-ratio asset.
+    const recommendations = [...new Set(weixinSearchRoots(documentRoot).flatMap(root => [...root.querySelectorAll<HTMLElement>('.img-recommend-wrap')]))].filter(visible);
+    if (recommendations.length === 1) {
+      const direct = button(recommendations[0]!, '直接编辑');
+      if (direct && !directPending) {
+        directPending=true;
+        void activate(ctx,ratio,'direct',direct).catch(error=>{directError=error;}).finally(()=>{directPending=false;});
+      }
+    }
+  }, ctx, `打开视频号 ${ratio} 封面编辑器`);
   ctx.progress(`已打开视频号 ${ratio} 封面编辑器`, `cover-${ratio}-open`);
   const upload = button(modal, '上传封面');
   if (!upload) throw new Error(`未找到视频号 ${ratio} 封面上传入口`);
-  ctx.edit(() => upload.click());
-  const input = await waitForWeixin(() => weixinSearchRoots(documentRoot)
-    .flatMap(root => [...root.querySelectorAll<HTMLInputElement>('input[type="file"]')])
-    .find(element => !element.disabled && !element.files?.length && /image|png|jpe?g|webp/i.test(element.accept || 'image/*')), ctx, `等待视频号 ${ratio} 封面上传控件`);
+  const preview = upload.closest('.single-cover-uploader-wrap') ?? modal;
+  const previousImages = new Map([...preview.querySelectorAll('img')].map(image => [image, image.currentSrc || image.src]));
   ctx.progress(`正在上传视频号 ${ratio} 封面`, `cover-${ratio}-upload`);
-  const transfer = new DataTransfer();
-  transfer.items.add(new File([asset.blob], asset.name, {type: asset.type, lastModified: asset.lastModified}));
-  input.files = transfer.files;
-  input.dispatchEvent(new Event('input', {bubbles: true}));
-  input.dispatchEvent(new Event('change', {bubbles: true}));
+  if (ctx.activateCover) await activate(ctx,ratio,'upload',upload,asset);
+  else {
+    ctx.edit(()=>upload.click());
+    const input = await waitForWeixin(() => [...modal.querySelectorAll<HTMLInputElement>('input[type="file"]')]
+      .find(element => !element.disabled && !element.files?.length && /image|png|jpe?g|webp/i.test(element.accept || 'image/*')), ctx, `等待视频号 ${ratio} 封面上传控件`);
+    const realm = (input.ownerDocument.defaultView ?? window) as Window & typeof globalThis;
+    const transfer = new realm.DataTransfer();
+    transfer.items.add(new realm.File([asset.blob], asset.name, {type: asset.type, lastModified: asset.lastModified}));
+    input.files = transfer.files;
+    input.dispatchEvent(new realm.Event('input', {bubbles: true}));
+    input.dispatchEvent(new realm.Event('change', {bubbles: true}));
+  }
+  await waitForWeixin(() => {
+    const image = [...preview.querySelectorAll('img')].find(image => image.complete && image.naturalWidth > 0 && previousImages.get(image) !== (image.currentSrc || image.src));
+    if (!image) return false;
+    const canvas = [...modal.querySelectorAll<HTMLCanvasElement>('.crop-area canvas')].find(visible);
+    // Channels downsizes portrait sources (for example 1086x1448 -> 810x1080).
+    return !canvas || (canvas.width > 0 && canvas.height > 0 && canvas.width * image.naturalHeight === canvas.height * image.naturalWidth && canvas.style.opacity !== '0');
+  }, ctx, `等待视频号 ${ratio} 封面预览加载`, 120000);
   const confirm = await waitForWeixin(() => {
     const current = coverModal(documentRoot, ratio);
     if (!current) return;
@@ -112,7 +189,7 @@ async function fillWeixinCover(documentRoot: Document, ratio: CoverRatio, asset:
     return button;
   }, ctx, `等待视频号 ${ratio} 封面上传完成`, 120000);
   ctx.progress(`已上传视频号 ${ratio} 封面，等待确认`, `cover-${ratio}-confirm`);
-  ctx.edit(() => confirm.click());
+  await activate(ctx,ratio,'confirm',confirm);
   await waitForWeixin(() => {
     const current = coverModal(documentRoot, ratio);
     const updated = coverCard(documentRoot, ratio)?.image;
@@ -140,8 +217,31 @@ function waitForWeixin<T>(read: () => T | undefined | false, ctx: FillContext, l
   });
 }
 
+function weixinScheduleInput(documentRoot: Document): HTMLInputElement | undefined {
+  return weixinSearchRoots(documentRoot).flatMap(root => [...root.querySelectorAll<HTMLInputElement>('input[placeholder="请选择发表时间"]')]).find(visible);
+}
+async function setWeixinSchedule(documentRoot: Document, scheduleAt: string, ctx: FillContext): Promise<string> {
+  const [date,time]=scheduleAt.split('T');
+  if(!date||!time)throw new Error('定时发布时间格式无效，请重新选择时间');
+  const roots=weixinSearchRoots(documentRoot);
+  const scheduled=roots.flatMap(root=>[...root.querySelectorAll<HTMLInputElement>('input[type="radio"][value="1"]')]).find(input=>visible(input)&&/定时/.test(input.parentElement?.parentElement?.textContent??''));
+  if(!scheduled)return '视频号编辑页没有定时控件，已跳过定时设置；';
+  ctx.progress('正在设置视频号定时发布时间','schedule');
+  const wasEnabled=scheduled.checked;
+  if(!wasEnabled){ctx.edit(()=>scheduled.click());await waitForWeixin(()=>scheduled.checked,ctx,'核验视频号定时发布开关',10000);}
+  const input=await waitForWeixin(()=>weixinScheduleInput(documentRoot),ctx,'等待视频号定时日期和时间控件',10000);
+  const display=`${date} ${time}`;
+  if(wasEnabled && input.value && input.value!==display && input.value!==scheduleAt)throw new Error('视频号编辑页已有不同的定时发布时间，未覆盖，请手动检查');
+  const inputPrototype=input.ownerDocument.defaultView?.HTMLInputElement.prototype ?? HTMLInputElement.prototype;
+  const setter=Object.getOwnPropertyDescriptor(inputPrototype,'value')?.set;
+  if(!setter)throw new Error('无法设置视频号定时发布时间');
+  ctx.edit(()=>{setter.call(input,display);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));});
+  await waitForWeixin(()=>input.value===display||input.value===scheduleAt,ctx,'核验视频号定时发布时间',10000);
+  return `已设置并回读视频号定时发布时间 ${display}；请检查后手动发表。`;
+}
+
 /** Video Channels keeps the composer in a same-origin empty.html iframe. */
-export async function fillWeixin(documentRoot: Document, publication: Publication, ctx: FillContext, cover?: Asset, pkCovers: Asset[] = []): Promise<string> {
+export async function fillWeixin(documentRoot: Document, publication: Publication, ctx: WeixinFillContext, cover?: Asset, pkCovers: Asset[] = []): Promise<string> {
   const {signal, progress} = ctx;
   const wait = <T>(read: () => T | undefined | false, label: string, timeout = 60000) => new Promise<T>((resolve, reject) => {
     const started = Date.now();
@@ -165,15 +265,36 @@ export async function fillWeixin(documentRoot: Document, publication: Publicatio
   progress('已找到视频号描述框', 'copy');
   const uploadReady = await wait(() => weixinSearchRoots(documentRoot).some(root => {
     const completedLabel = [...root.querySelectorAll('*')].some(e => {
-      if (e.children.length !== 0) return false;
+      if (e.children.length !== 0 || !visible(e)) return false;
       const text = e.textContent?.trim();
       return text === '重新上传' || text === '删除';
     });
-    const media = [...root.querySelectorAll('video')].some(video => Boolean(video.currentSrc || video.getAttribute('src')));
-    return completedLabel || media;
+    return completedLabel;
   }), '等待视频号视频处理完成', 600000);
   if (!uploadReady) throw new Error('视频号视频处理未完成');
   progress('视频号视频已处理完成', 'upload');
+  const roots=weixinSearchRoots(documentRoot);
+  let declarationNote='';
+  for(const root of roots){
+    const originalControl=findDeclarationControl(root,['声明原创','原创视频']);
+    if(!originalControl)continue;
+    let checked=false;
+    ctx.edit(()=>{checked=ensureChecked(originalControl);});
+    if(checked)declarationNote+='已勾选原创声明；';
+    break;
+  }
+  const declarationEntry=roots.map(root=>findDeclarationText(root,['选择视频标注','选择内容标注','添加内容声明','作品声明'])).find(Boolean);
+  if(declarationEntry){
+    progress('正在设置视频号 AI 生成标记','declaration');
+    try{
+      ctx.edit(()=>declarationEntry.click());
+      const option=await wait(()=>roots.map(root=>findDeclarationText(root,['含AI生成内容','含 AI 生成内容','内容由AI生成','内容由 AI 生成'])).find(Boolean),'等待视频号 AI 生成标记',10000);
+      if(option)ctx.edit(()=>option.click());
+      if(option)declarationNote+='已选择 AI 生成标记；';
+    }catch{declarationNote+='AI 生成标记未确认，请手动检查；';}
+  }
+  let scheduleNote='';
+  if(publication.scheduleAt) scheduleNote=await setWeixinSchedule(documentRoot,publication.scheduleAt,ctx);
   const selected = cover ? [{asset: cover, ratio: await inspectCover(cover.blob)}, ...await Promise.all(pkCovers.map(async asset => ({asset, ratio: await inspectCover(asset.blob)})))] : [];
   const slots = selectWeixinCovers(selected);
   const ordered = selected[0]?.ratio === '3:4'
@@ -199,5 +320,5 @@ export async function fillWeixin(documentRoot: Document, publication: Publicatio
     description.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: publicationBody(publication)}));
   });
   await wait(() => title.value === publication.title.slice(0, 16) && sameText(textOf(description), publicationBody(publication)), '核验视频号文案', 30000);
-  return `视频号短标题和视频描述已回读核验；${coverCount ? `${coverCount} 张封面已按 3:4/4:3 槽位更新，请检查裁剪。` : ''}${publication.tags.length ? '已填写 #标签 文本，请检查平台话题。' : ''}请检查后手动发表；未发表、未保存草稿。`;
+  return `视频号短标题和视频描述已回读核验；${declarationNote}${scheduleNote}${coverCount ? `${coverCount} 张封面已按 3:4/4:3 槽位更新，请检查裁剪。` : ''}${publication.tags.length ? '已填写 #标签 文本，请检查平台话题。' : ''}请检查后手动发表；未发表、未保存草稿。`;
 }

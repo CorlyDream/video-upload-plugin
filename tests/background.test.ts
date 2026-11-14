@@ -1,3 +1,4 @@
+import {clickWeixinCoverControl} from '../src/extension/weixin';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
@@ -77,7 +78,7 @@ function worker(initialization: Promise<void> = Promise.resolve(), splitInitialN
   const source = readFileSync(new URL('../src/extension/background.ts', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '');
   runInNewContext(stripTypeScriptTypes(source), {
-    Error, authorizeClaim,approveBridge,consumeGrant,createDiagnostics, diagnosticCode, chrome, URL, crypto, setTimeout, clearTimeout, console,
+    clickWeixinCoverControl, Error, authorizeClaim,approveBridge,consumeGrant,createDiagnostics, diagnosticCode, chrome, URL, crypto, setTimeout, clearTimeout, console,
     inspectCover:async(blob:string)=>blob==='pk2'?'3:4':'4:3',selectKuaishouCovers,
     isActive, platforms, acceptCheckpoint, normalizePublication, hasPublication, normalizeDouyinPublication, readAsset: async (_batch: string, id: string) => ['cover','pk1','pk2','pk3'].includes(id) ? ({id, blob:id,batchId:'batch', type:'image/jpeg', size:200}) : ({}),
   });
@@ -116,6 +117,23 @@ describe('worker lifecycle races', () => {
     const harness=worker(Promise.resolve(), false, false);const wb=port(1);harness.chrome.runtime.onConnect.emit(wb);await settle();
     wb.onMessage.emit({id:'start',command:{type:'start',platform:'weixin'}});await settle();
     expect(harness.page.messages.filter(m=>m.type==='run')).toHaveLength(1);
+    wb.disconnect();await settle();
+  });
+  it('binds Weixin cover actions to the active task and editor document',async()=>{
+    const h=worker(Promise.resolve(),false,false),wb=port(1);h.chrome.runtime.onConnect.emit(wb);await settle();
+    wb.onMessage.emit({id:'start',command:{type:'start',platform:'weixin'}});await settle();
+    const task=h.page.messages.find(m=>m.type==='run').task;
+    Object.assign(h.chrome.webNavigation,{getAllFrames:async()=>[{parentFrameId:0,parentDocumentId:task.documentId,url:'https://channels.weixin.qq.com/micro/content/post/create',documentId:'weixin-editor',errorOccurred:false}]});
+    const execute=vi.spyOn(h.chrome.scripting,'executeScript').mockResolvedValue([{documentId:'weixin-editor',result:true}] as any);
+    const sender={id:'review',tab:{id:task.tabId},frameId:0,documentId:task.documentId,url:'https://channels.weixin.qq.com/platform/post/create'};
+    const request={type:'weixin-cover-click',taskId:task.taskId,attemptId:task.attemptId,ratio:'3:4',action:'open'};
+    for(const [message,who] of [[{...request,action:'publish'},sender],[{...request,action:'upload',assetId:'unrelated'},sender],[request,{...sender,documentId:'stale'}],[{...request,attemptId:'stale'},sender]] as const){
+      const respond=vi.fn();h.chrome.runtime.onMessage.emit(message,who,respond);await settle();expect(respond.mock.calls[0]![0].ok).toBe(false);
+    }
+    expect(execute).not.toHaveBeenCalled();
+    const respond=vi.fn();h.chrome.runtime.onMessage.emit(request,sender,respond);await settle();
+    expect(respond).toHaveBeenCalledWith({ok:true});
+    expect(execute).toHaveBeenCalledWith({target:{tabId:task.tabId,documentIds:[task.documentId]},world:'MAIN',func:clickWeixinCoverControl,args:['3:4','open',null]});
     wb.disconnect();await settle();
   });
   it('honors stop while direct tab creation is still pending',async()=>{

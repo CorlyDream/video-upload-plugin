@@ -5,6 +5,9 @@
  .publication-fields input:not([type=file]), .publication-fields textarea { box-sizing: border-box; width: 100%; padding: 10px; border: 1px solid #aebbd0; border-radius: 6px; background: white; color: #24364b; font: inherit; }
  .publication-fields textarea { resize: vertical; }
  .publication-fields :disabled { opacity: .65; }
+ .schedule-controls { display: flex; align-items: center; gap: 8px; }
+ .schedule-controls input { flex: 1; min-width: 0; }
+ .schedule-controls button { flex: none; white-space: nowrap; }
 .cover-preview-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:2px}
 .cover-preview-card{position:relative;display:grid;grid-template-columns:76px minmax(0,1fr);gap:8px;align-items:center;min-width:0;padding:9px;border:1px solid #d5dfeb;border-radius:8px;background:#fff;cursor:grab}
 .cover-preview-card:active{cursor:grabbing}.cover-preview-card.is-dragging{border-color:#618de2;background:#edf3ff;opacity:.72}

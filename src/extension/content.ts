@@ -70,9 +70,20 @@ if (!scope.__videoUploadM0) {
     let input: HTMLInputElement | undefined;
     function candidates() {
       if (task?.platform === 'bilibili') {
-        return [...document.querySelectorAll<HTMLInputElement>('input[type="file"]')].filter(element => {
+        const inputs = [...document.querySelectorAll<HTMLInputElement>('input[type="file"]')].filter(element => {
           const accept = element.accept.toLowerCase();
-          return element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden' && !element.disabled && accept !== '.txt' && /video|\.mp4|\.mov|\.webm/.test(accept) && !element.files?.length;
+          return !element.disabled && accept !== '.txt' && /video|\.mp4|\.mov|\.webm/.test(accept) && !element.files?.length;
+        });
+        // Bilibili keeps a second, hidden uploader input around while the
+        // upload card mounts. Prefer its named control and then the visible
+        // control; never treat the .txt input as a video target.
+        const uploadCardInput = inputs.find(element => element.closest('.bcc-upload-wrapper'));
+        if (uploadCardInput) return [uploadCardInput];
+        const namedVisible = inputs.find(element => element.name === 'buploader' && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden' && !element.closest('[id^="b-uploader-input-container_"]'));
+        if (namedVisible) return [namedVisible];
+        return inputs.sort((a, b) => {
+          const score = (element: HTMLInputElement) => (element.name === 'buploader' ? 2 : 0) + (element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden' ? 1 : 0);
+          return score(b) - score(a);
         });
       }
       const roots: ParentNode[] = task?.platform === 'weixin' ? weixinSearchRoots(document) : [document];
@@ -111,6 +122,7 @@ if (!scope.__videoUploadM0) {
           input!.files = transfer.files;
           input!.dispatchEvent(new Event('input', { bubbles: true }));
           if (!stopped) input!.dispatchEvent(new Event('change', { bubbles: true }));
+          if (!input!.files?.length) throw new Error('B 站上传控件未接受视频文件，请刷新上传页后重试');
           }
           let reason='文件已交给页面控件；尚未核验平台上传完成，请打开页面检查。';
           if (!stopped && task?.platform === 'weixin') {
@@ -120,14 +132,23 @@ if (!scope.__videoUploadM0) {
             reason = await fillWeixin(document, normalizePublication(task.publication, false), {
               signal:cancellation.signal, progress:(reason,stage)=>report('transferring', reason, stage),
               edit(action) { ownSynchronousEdit = true; try { action(); } finally { ownSynchronousEdit = false; } },
+              activateCover: async (ratio,action,coverAsset) => {
+                if (stopped || !task) return false;
+                const result=await chrome.runtime.sendMessage({type:'weixin-cover-click',taskId:task.taskId,attemptId:task.attemptId,ratio,action,assetId:coverAsset?.id});
+                if(!result?.ok)throw new Error(result?.error??'视频号封面操作失败');
+                return true;
+              },
             }, asset.cover, asset.pkCovers ?? []);
-          } else if (!stopped && task?.platform === 'bilibili' && hasPublication(task.publication)) {
+          } else if (!stopped && task?.platform === 'bilibili' && (hasPublication(task.publication) || task.coverAssetId)) {
             clearTimeout(deadline);
+            if (task.coverAssetId && (asset.cover?.id !== task.coverAssetId || asset.cover.batchId !== task.batchId)) throw new Error('封面身份不匹配');
             reason = await fillBilibili(document, normalizePublication(task.publication, false), {
               signal:cancellation.signal, progress:(reason,stage)=>report('transferring', reason, stage),
+              generatedTitle: asset.name.replace(/\.[^.]+$/u, ''),
+              cover: task.coverAssetId ? asset.cover : undefined,
               edit(action) { ownSynchronousEdit = true; try { action(); } finally { ownSynchronousEdit = false; } },
             });
-          } else if (!stopped && task && ['xiaohongshu','kuaishou','douyin'].includes(task.platform) && (hasPublication(task.publication) || task.coverAssetId || task.coverPk !== undefined)) {
+          } else if (!stopped && task && ['xiaohongshu','kuaishou','douyin'].includes(task.platform) && (hasPublication(task.publication) || (task.platform === 'douyin' && task.publication?.collection) || task.coverAssetId || task.coverPk !== undefined)) {
             clearTimeout(deadline);
             if (task.coverAssetId && (asset.cover?.id !== task.coverAssetId || asset.cover?.batchId !== task.batchId)) throw new Error('封面身份不匹配');
             if ((task.pkCoverAssetIds ?? []).length !== (asset.pkCovers ?? []).length || (task.pkCoverAssetIds ?? []).some((id,index)=>asset.pkCovers[index]?.id !== id || asset.pkCovers[index]?.batchId !== task!.batchId)) throw new Error('PK 封面身份不匹配');

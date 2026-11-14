@@ -1,3 +1,4 @@
+import {clickWeixinCoverControl} from './weixin';
 import {inspectCover,selectKuaishouCovers} from '../core/covers';
 import { platforms, isActive, acceptCheckpoint, type Batch, type Task, type SenderIdentity } from '../core/model';
 import { authorizeClaim, approveBridge, consumeGrant, type Grant, type Claim } from '../core/authorization';
@@ -203,7 +204,8 @@ async function command(command: WorkbenchCommand, owner: chrome.runtime.Port) {
       }
       const platform = platforms.find(item => item.id === platformId);
       if (!platform) throw new Error('未知平台');
-      if (!['xiaohongshu','kuaishou','douyin','weixin','bilibili'].includes(platform.id) && (hasPublication(batch.publication) || batch.cover)) throw new Error('文案和封面自动填写目前仅支持小红书、快手、抖音、视频号和 B 站');
+      if (!['xiaohongshu','kuaishou','douyin','weixin','bilibili'].includes(platform.id) && (hasPublication(batch.publication) || batch.publication?.collection || batch.cover)) throw new Error('文案、合集和封面自动填写目前仅支持小红书、快手、抖音、视频号和 B 站');
+      normalizePublication(batch.publication, false);
       if (platform.id === 'xiaohongshu') normalizePublication(batch.publication);
       if (platform.id === 'douyin') normalizeDouyinPublication(batch.publication);
       if (!await chrome.permissions.contains({ origins: [`${platform.origin}/*`] })) throw new Error('未获得该平台访问权限');
@@ -222,6 +224,10 @@ async function command(command: WorkbenchCommand, owner: chrome.runtime.Port) {
           if(coverIds.some(id=>!selectedAssets.some(asset=>asset.id===id)))throw new Error('原任务封面不存在，未重新选择');
         } else coverIds=selectKuaishouCovers(selectedAssets).map(c=>c.id).slice(0,batch.coverPk?2:1);
       }
+      // Platforms without a multi-cover/PK workflow receive only the main
+      // cover. Keep the selected candidates in the batch for platforms that
+      // can use them, without blocking the rest of the handoff.
+      if(platform.id==='weixin' || platform.id==='bilibili') coverIds=coverIds.slice(0,1);
       if (controller !== owner) throw new Error('工作台连接已失效');
       // Some embedded browsers cannot update the id returned by tabs.create.
       // Open the actual destination once, observing early navigations before create resolves.
@@ -257,7 +263,7 @@ async function command(command: WorkbenchCommand, owner: chrome.runtime.Port) {
         assetId: batch.asset.id,
       });
       task.publication = batch.publication ? normalizePublication(batch.publication, platform.id === 'xiaohongshu') : undefined;
-      task.coverAssetId = coverIds[0]; task.pkCoverAssetIds = coverIds.slice(1); task.coverPk = platform.id==='douyin'?undefined:batch.coverPk;
+      task.coverAssetId = coverIds[0]; task.pkCoverAssetIds = coverIds.slice(1); task.coverPk = (platform.id==='xiaohongshu' || platform.id==='kuaishou') ? batch.coverPk : undefined;
       if (!previous) batch.tasks.push(task);
       const initialNavigations=earlyNavigations.get(task.tabId) ?? [];
       navigations.set(task.tabId, { url: destination, loading: initialNavigations.length > 0 });
@@ -310,6 +316,31 @@ chrome.runtime.onConnect.addListener(port => {
     });
     send(port, { type: 'snapshot', snapshot: snapshot() });
   });
+});
+chrome.runtime.onMessage.addListener((message,sender,respond)=>{
+  if(message?.type!=='weixin-cover-click')return;
+  void serial(async()=>{
+    await ready;
+    try {
+      const who=identity(sender),task=active();
+      if(!controller||!task||task.platform!=='weixin'||who.frameId!==0||who.tabId!==task.tabId||who.documentId!==task.documentId||message.taskId!==task.taskId||message.attemptId!==task.attemptId||new URL(who.url).origin!=='https://channels.weixin.qq.com')throw new Error('视频号任务身份已失效');
+      if(!['3:4','4:3'].includes(message.ratio)||!['open','direct','upload','confirm'].includes(message.action))throw new Error('不支持的视频号封面操作');
+      let file: {base64:string;name:string;type:string;lastModified:number} | undefined;
+      if(message.action==='upload') {
+        if(![task.coverAssetId,...(task.pkCoverAssetIds??[])].includes(message.assetId))throw new Error('封面不属于当前任务');
+        const asset=await readAsset(task.batchId,message.assetId);
+        if(asset.size>20*1024*1024||!/^image\/(jpeg|png|webp)$/.test(asset.type)||await inspectCover(asset.blob)!==message.ratio)throw new Error('封面比例或类型不匹配');
+        const bytes=new Uint8Array(await asset.blob.arrayBuffer());
+        let binary='';for(let offset=0;offset<bytes.length;offset+=32768)binary+=String.fromCharCode(...bytes.subarray(offset,offset+32768));
+        file={base64:btoa(binary),name:asset.name,type:asset.type,lastModified:asset.lastModified};
+      }
+      if(!controller||active()!==task)throw new Error('视频号任务已停止');
+      const result=await chrome.scripting.executeScript({target:{tabId:who.tabId,documentIds:[who.documentId]},world:'MAIN',func:clickWeixinCoverControl,args:[message.ratio,message.action,file??null]});
+      if(!result[0]?.result)throw new Error('未找到当前比例的封面控件');
+      respond({ok:true});
+    }catch(error){respond({ok:false,error:errorText(error)});}
+  });
+  return true;
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type !== 'bridge-claim' && message?.type !== 'bridge-consume') return;

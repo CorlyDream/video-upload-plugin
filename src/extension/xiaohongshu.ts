@@ -1,17 +1,131 @@
 import { publicationBody, type Publication } from '../core/publication';
 import type { Asset } from '../core/model';
+import {ensureChecked, findDeclarationControl, findDeclarationText} from './declarations';
 
-export interface FillContext { signal: AbortSignal; progress: (reason: string, stage?: string) => void; edit: (action: () => void) => void }
+export interface FillContext { signal: AbortSignal; progress: (reason: string, stage?: string) => void; edit: (action: () => void) => void; generatedTitle?: string; cover?: Asset }
 const titleSelector = 'input[placeholder="填写标题会有更多赞哦"]';
 const bodySelector = '.tiptap.ProseMirror[contenteditable="true"]';
 const coverSelector = '.cover-plugin-preview';
 const visible = (e: Element) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+export function isUploadPreviewReady(preview?: { getAttribute: (name: string) => string | null }): boolean {
+  return !!preview && preview.getAttribute('aria-busy') !== 'true';
+}
 function one<T extends Element>(selector: string, root: ParentNode = document): T | undefined {
   const matches = [...root.querySelectorAll<T>(selector)].filter(visible);
   if (matches.length > 1) throw new Error('发现多个填写控件，已停止以保护原稿');
   return matches[0];
 }
 function guard(signal: AbortSignal) { if (signal.aborted) throw new Error('操作已停止'); }
+
+function compactText(value: string) { return value.replace(/\s+/gu, ' ').trim(); }
+function scheduleControls(root: ParentNode = document): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>('button,label,[role="button"],[role="switch"],input[type="checkbox"],div,span')]
+    .filter(visible)
+    .filter(element => compactText(element.textContent ?? '').startsWith('定时发布') || compactText(element.getAttribute('aria-label') ?? '').startsWith('定时发布'))
+    .filter(element => ![...element.children].some(child => compactText(child.textContent ?? '').startsWith('定时发布')))
+    .sort((a, b) => (a.textContent?.length ?? 0) - (b.textContent?.length ?? 0));
+}
+function scheduleInput(root: ParentNode, kind: 'datetime-local' | 'date' | 'time'): HTMLInputElement | undefined {
+  const selector = kind === 'datetime-local' ? 'input[type="datetime-local"]' : `input[type="${kind}"]`;
+  const inputs = [...root.querySelectorAll<HTMLInputElement>(selector)].filter(visible);
+  if (inputs.length > 1) throw new Error('定时发布时间控件不唯一，请手动设置');
+  return inputs[0];
+}
+function labeledScheduleInputs(root: ParentNode): HTMLInputElement[] {
+  return [...root.querySelectorAll<HTMLInputElement>('input')].filter(input => visible(input) && /日期|时间/.test(`${input.getAttribute('aria-label') ?? ''} ${input.placeholder ?? ''}`));
+}
+function setInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  if (!setter) throw new Error('无法设置定时发布时间');
+  setter.call(input, value);
+  input.dispatchEvent(new Event('input', {bubbles: true}));
+  input.dispatchEvent(new Event('change', {bubbles: true}));
+}
+function scheduleDisplay(scheduleAt: string) {
+  return scheduleAt.replace('T', ' ');
+}
+function collectionTrigger(): HTMLElement | undefined {
+  const controls = [...document.querySelectorAll<HTMLElement>('.collection-plugin-button')].filter(visible);
+  if (controls.length > 1) throw new Error('小红书合集控件不唯一，请手动设置');
+  return controls[0];
+}
+function collectionOption(name: string): HTMLElement | undefined {
+  const expected = compactText(name);
+  const options = [...document.querySelectorAll<HTMLElement>('.collection-plugin-popover-content .item')]
+    .filter(visible)
+    .filter(item => compactText(item.querySelector<HTMLElement>('.item-label')?.textContent ?? item.textContent ?? '') === expected);
+  if (options.length > 1) throw new Error('小红书同名合集不唯一，请手动设置');
+  return options[0];
+}
+export async function selectXiaohongshuCollection(name: string, context: Pick<FillContext, 'signal' | 'progress' | 'edit'>): Promise<string> {
+  const expected = compactText(name);
+  if (!expected) return '';
+  const {signal, progress, edit} = context;
+  const trigger = collectionTrigger();
+  if (!trigger) return '小红书编辑页没有合集控件，已跳过合集设置；';
+  progress('正在选择小红书合集', 'collection');
+  const current = compactText(trigger.textContent ?? '');
+  if (current.includes(expected) && !current.includes('选择合集')) return `已回读小红书合集“${expected}”；`;
+  edit(() => trigger.click());
+  const option = await waitFor(() => collectionOption(name), signal, 10000, false, '等待小红书同名合集');
+  edit(() => option.click());
+  await waitFor(() => {
+    const updated = collectionTrigger();
+    if (!updated) return false;
+    const text = compactText(updated.textContent ?? '');
+    return text.includes(expected) && !text.includes('选择合集');
+  }, signal, 10000, true, '核验小红书合集选择');
+  return `已选择并回读小红书合集“${expected}”；`;
+}
+/** Enable Xiaohongshu's schedule control and verify its selected local time. */
+export async function setXiaohongshuSchedule(scheduleAt: string, context: Pick<FillContext, 'signal' | 'progress' | 'edit'>): Promise<string> {
+  const {signal, progress, edit} = context;
+  const [date, time] = scheduleAt.split('T');
+  if (!date || !time) throw new Error('定时发布时间格式无效，请重新选择时间');
+  progress('正在设置小红书定时发布时间', 'schedule');
+  const control = scheduleControls()[0];
+  if (!control) return '小红书编辑页没有定时控件，已跳过定时设置；';
+  const controlScope = control.closest('.post-time-wrapper') ?? control.closest('label,section,form,div') ?? document;
+  const checkbox = control instanceof HTMLInputElement && control.type === 'checkbox'
+    ? control
+    : controlScope.querySelector<HTMLInputElement>('input[type="checkbox"]');
+  const switchControl = control.getAttribute('role') === 'switch' ? control : controlScope.querySelector<HTMLElement>('[role="switch"]');
+  const enabled = () => checkbox ? checkbox.checked : switchControl ? switchControl.getAttribute('aria-checked') === 'true' : true;
+  const wasEnabled = enabled();
+  if (!checkbox && !switchControl) {
+    edit(() => control.click());
+  } else if (!enabled()) {
+    edit(() => (checkbox ?? switchControl ?? control).click());
+    await waitFor(() => enabled(), signal, 10000, true, '核验小红书定时发布开关');
+  }
+  const scope = controlScope as ParentNode;
+  const roots = [scope, document].filter((root, index, all) => all.indexOf(root) === index);
+  const panel = roots.find(root => root.querySelector('input[type="datetime-local"],input[type="date"],input[type="time"]') || labeledScheduleInputs(root).length >= 2) ?? document;
+  const datetime = scheduleInput(panel, 'datetime-local');
+  const dateInput = datetime ? undefined : scheduleInput(panel, 'date');
+  const timeInput = datetime ? undefined : scheduleInput(panel, 'time');
+  const labeled = datetime || dateInput || timeInput ? [] : labeledScheduleInputs(panel);
+  if (!datetime && (!dateInput || !timeInput) && labeled.length < 2) throw new Error('未找到小红书定时日期和时间控件，请手动设置');
+  const currentDate = datetime?.value ?? dateInput?.value ?? labeled.find(input => /日期/.test(`${input.getAttribute('aria-label') ?? ''} ${input.placeholder ?? ''}`))?.value ?? '';
+  const currentTime = datetime ? '' : timeInput?.value ?? labeled.find(input => /时间/.test(`${input.getAttribute('aria-label') ?? ''} ${input.placeholder ?? ''}`))?.value ?? '';
+  if (wasEnabled && ((datetime && currentDate && currentDate !== scheduleAt) || (!datetime && (currentDate || currentTime) && (currentDate !== date || currentTime !== time)))) throw new Error('编辑页已有不同的定时发布时间，未覆盖，请手动检查');
+  edit(() => {
+    if (datetime) setInputValue(datetime, scheduleAt);
+    else if (dateInput && timeInput) { setInputValue(dateInput, date); setInputValue(timeInput, time); }
+    else {
+      const dateLabeled = labeled.find(input => /日期/.test(`${input.getAttribute('aria-label') ?? ''} ${input.placeholder ?? ''}`));
+      const timeLabeled = labeled.find(input => /时间/.test(`${input.getAttribute('aria-label') ?? ''} ${input.placeholder ?? ''}`));
+      if (!dateLabeled || !timeLabeled) throw new Error('无法区分定时日期和时间控件，请手动设置');
+      setInputValue(dateLabeled, date); setInputValue(timeLabeled, time);
+    }
+  });
+  await waitFor(() => {
+    if (datetime) return datetime.value === scheduleAt;
+    if (dateInput && timeInput) return dateInput.value === date && timeInput.value === time;
+    return labeled.some(input => input.value === date) && labeled.some(input => input.value === time);
+  }, signal, 10000, true, '核验小红书定时发布时间');
+  return `已设置并回读定时发布时间 ${scheduleDisplay(scheduleAt)}；请检查后手动发布。`;
+}
 export function waitFor<T>(read: () => T | undefined | false, signal: AbortSignal, timeout = 30000, deferred = false, stage = '页面确认', onVisibility?: (visible:boolean)=>void): Promise<T> {
   guard(signal);
   return new Promise((resolve, reject) => {
@@ -81,7 +195,7 @@ export async function fillXiaohongshu(publication: Publication, cover: Asset | u
     const title = one<HTMLInputElement>(titleSelector);
     const body = one<HTMLElement>(bodySelector);
     const preview = one<HTMLElement>(coverSelector);
-    if (!title || !body || !preview || preview.getAttribute('aria-busy') !== 'false') return;
+    if (!title || !body || !isUploadPreviewReady(preview)) return;
     return {title, body};
   }, signal, 10 * 60 * 1000, false, '视频上传与处理');
   guard(signal);
@@ -112,6 +226,23 @@ export async function fillXiaohongshu(publication: Publication, cover: Asset | u
   };
   // Separate a browser event turn so framework rerenders cannot be mistaken for acceptance.
   await waitFor(() => { verifyCopy(); return true; }, signal, 30000, true);
+  let declarationNote='';
+  const originalControl=findDeclarationControl(document,['声明原创','原创视频']);
+  if(originalControl){let checked=false;context.edit(()=>{checked=ensureChecked(originalControl);});if(checked) declarationNote+='已勾选原创声明；';}
+  const declarationEntry=findDeclarationText(document,['添加内容类型声明','添加创作声明','内容类型声明']);
+  if(declarationEntry){
+    progress('正在设置小红书 AI 生成声明','declaration');
+    try{
+      context.edit(()=>declarationEntry.click());
+      const option=await waitFor(()=>findDeclarationText(document,['含AI生成内容','含 AI 生成内容','内容由AI生成','内容由 AI 生成','AI生成内容','AI 生成']),signal,10000,false,'等待小红书 AI 生成声明');
+      if(option)context.edit(()=>option.click());
+      if(option)declarationNote+='已选择 AI 生成声明；';
+    }catch{declarationNote+='AI 生成声明未确认，请手动检查；';}
+  }
+  let collectionNote = '';
+  if (publication.collection) collectionNote = await selectXiaohongshuCollection(publication.collection, context);
+  let scheduleNote = '';
+  if (publication.scheduleAt) scheduleNote = await setXiaohongshuSchedule(publication.scheduleAt, context);
   let coverResult = '保留平台默认封面';
   if (pkCovers.length > 3 || (pkCovers.length && (!cover || !coverPk))) throw new Error('PK 封面配置无效');
   if (coverPk !== undefined) {
@@ -234,5 +365,5 @@ export async function fillXiaohongshu(publication: Publication, cover: Asset | u
     coverResult = `${index+1} 张封面预览已更新（请检查裁剪）`;
   }
   guard(signal); verifyCopy();
-  return `标题、正文已回读核验；${coverResult}；${coverPk === undefined ? "" : coverPk ? "PK 已开启" : "PK 已关闭"}。${publication.tags.length ? '已填写 #标签 文本，平台话题候选需你确认。' : ''}请检查后手动发布；未发布、未存草稿。`;
+  return `标题、正文已回读核验；${declarationNote}${collectionNote}${scheduleNote ? scheduleNote + '；' : ''}${coverResult}；${coverPk === undefined ? "" : coverPk ? "PK 已开启" : "PK 已关闭"}。${publication.tags.length ? '已填写 #标签 文本，平台话题候选需你确认。' : ''}请检查后手动发布；未发布、未存草稿。`;
 }

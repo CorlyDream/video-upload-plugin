@@ -1,6 +1,7 @@
 import {kuaishouDescription, type Publication} from '../core/publication';
 import type {Asset} from '../core/model';
 import {waitFor, type FillContext} from './xiaohongshu';
+import {declarationVisible, ensureChecked, findDeclarationControl, findDeclarationText} from './declarations';
 
 const rootSelector = '[class^="_high-cover-editor_"]';
 const visible = (e:Element) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
@@ -28,6 +29,28 @@ function closeToExpected(actual:HTMLCanvasElement, expected:HTMLCanvasElement):b
   let total=0;for(let i=0;i<a.length;i+=4)total+=Math.abs((a[i]??0)-(b[i]??0))+Math.abs((a[i+1]??0)-(b[i+1]??0))+Math.abs((a[i+2]??0)-(b[i+2]??0));
   return total/(a.length/4*3)<=24;
 }
+type KuaishouWait = <T>(read:()=>T|undefined|false,stage:string,label:string,timeout?:number,deferred?:boolean)=>Promise<T>;
+function setKuaishouInput(input: HTMLInputElement, value: string) {
+  const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;
+  if(!setter)throw new Error('无法设置快手定时发布时间');
+  setter.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));
+}
+async function setKuaishouSchedule(scheduleAt:string, wait:KuaishouWait, context:FillContext):Promise<string>{
+  const [date,time]=scheduleAt.split('T');
+  if(!date||!time)throw new Error('定时发布时间格式无效，请重新选择时间');
+  const radios=[...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')].filter(visible);
+  const scheduled=radios.find(input=>/定时发布/.test(input.closest('label,div')?.textContent??'') && input.value==='2') ?? radios.find(input=>input.value==='2');
+  if(!scheduled)return '快手编辑页没有定时控件，已跳过定时设置；';
+  context.progress('正在设置快手定时发布时间','schedule');
+  const wasEnabled=scheduled.checked;
+  if(!wasEnabled){context.edit(()=>scheduled.click());await wait(()=>scheduled.checked,'schedule','核验快手定时发布开关',10000,true);}
+  const input=await wait(()=>[...document.querySelectorAll<HTMLInputElement>('input')].filter(visible).find(element=>element!==scheduled && (/日期|时间/.test(`${element.placeholder} ${element.getAttribute('aria-label')??''}`)||/^\d{4}-\d{2}-\d{2}/.test(element.value))), 'schedule','等待快手定时日期和时间控件',10000);
+  const display=scheduleAt.replace('T',' ');
+  if(wasEnabled && input.value && input.value!==scheduleAt && input.value!==display)throw new Error('快手编辑页已有不同的定时发布时间，未覆盖，请手动检查');
+  context.edit(()=>setKuaishouInput(input,display));
+  await wait(()=>input.value===scheduleAt || input.value===display,'schedule','核验快手定时发布时间',10000,true);
+  return `已设置并回读快手定时发布时间 ${display}；请检查后手动发布。`;
+}
 export async function fillKuaishou(publication:Publication, cover:Asset|undefined, context:FillContext, pkCovers:Asset[]=[], coverPk?:boolean):Promise<string>{
   const {signal,progress}=context;
   const wait=<T>(read:()=>T|undefined|false, stage:string, label:string, timeout=60000, deferred=false)=>waitFor(read,signal,timeout,deferred,label,
@@ -54,6 +77,21 @@ export async function fillKuaishou(publication:Publication, cover:Asset|undefine
     return true;
   };
   await wait(verifyCopy,'copy','核验快手作品描述',30000,true);
+  let declarationNote='';
+  const originalControl=findDeclarationControl(document,['声明原创','原创视频']);
+  if(originalControl){let checked=false;context.edit(()=>{checked=ensureChecked(originalControl);});if(checked) declarationNote+='已勾选原创声明；';}
+  const declarationEntry=findDeclarationText(document,['选择视频标注','选择内容标注','添加内容声明','作品声明']);
+  if(declarationEntry){
+    progress('正在设置快手 AI 生成声明','declaration');
+    try{
+      context.edit(()=>declarationEntry.click());
+      const option=await wait(()=>findDeclarationText(document,['含AI生成内容','含 AI 生成内容','内容由AI生成','内容由 AI 生成','AI生成','AI 生成']),'declaration','等待快手 AI 生成声明',10000);
+      if(option)context.edit(()=>option.click());
+      if(option)declarationNote+='已选择 AI 生成声明；';
+    }catch{declarationNote+='AI 生成声明未确认，请手动检查；';}
+  }
+  let scheduleNote='';
+  if(publication.scheduleAt) scheduleNote=await setKuaishouSchedule(publication.scheduleAt,wait,context);
   if(coverPk!==undefined){
     guard(signal);progress(coverPk?'正在开启封面 PK':'正在关闭封面 PK','pk');
     const toggle=one<HTMLButtonElement>('[role="switch"]',fields.covers);
@@ -107,5 +145,5 @@ export async function fillKuaishou(publication:Publication, cover:Asset|undefine
     },stage('confirm'),label+'：确认封面结果',90000,true);
   }
   guard(signal);verifyCopy();
-  return `作品描述已回读核验（标题 + 前 4 个标签，不含正文）；${covers.length?`${covers.length} 张封面预览已更新（请检查裁剪）`:'保留平台默认封面'}；${coverPk?'PK 已开启。':''}标签为 #文本，请检查平台话题。未发布、未存草稿。`;
+  return `作品描述已回读核验（标题 + 前 4 个标签，不含正文）；${declarationNote}${scheduleNote}${covers.length?`${covers.length} 张封面预览已更新（请检查裁剪）`:'保留平台默认封面'}；${coverPk?'PK 已开启。':''}标签为 #文本，请检查平台话题。未发布、未存草稿。`;
 }

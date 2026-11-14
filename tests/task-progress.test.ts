@@ -30,14 +30,25 @@ it('only includes relevant stages for file handoff platforms',()=>{
 });
 it('shows Bilibili metadata stage without download stage',()=>{
  const p=taskProgress({...task,platform:'bilibili',coverAssetId:undefined,pkCoverAssetIds:[],coverPk:undefined,pipelineStage:'copy'});
- expect(p.steps.map(s=>s.id)).toEqual(['page','transfer','upload','copy','review']);
- expect(p.current.label).toBe('填写并核验标题和简介');
+ expect(p.steps.map(s=>s.id)).toEqual(['page','transfer','upload','copy','declaration','review']);
+ expect(p.current.label).toBe('填写并核验标题、简介和标签');
 });
 it('shows Kuaishou description and exactly two cover slots',()=>{
  const p=taskProgress({...task,platform:'kuaishou',pipelineStage:'cover-1-upload'});
  expect(p.current.label).toBe('封面 2/2 · 上传与校验');
  expect(p.steps.find(s=>s.id==='copy')?.label).toBe('填写并核验作品描述（标题和标签）');
  expect(p.steps.some(s=>s.id==='cover-2-open')).toBe(false);
+});
+
+it('shows the Douyin collection stage when a collection was requested',()=>{
+ const p=taskProgress({...task,platform:'douyin',publication:{title:'',description:'',tags:[],collection:'英语启蒙合集'},coverAssetId:undefined,pkCoverAssetIds:[],coverPk:undefined,pipelineStage:'collection'});
+ expect(p.current.label).toBe('选择并核验抖音合集');
+ expect(p.steps.map(s=>s.id)).toContain('collection');
+});
+it('shows the Xiaohongshu schedule stage when requested',()=>{
+ const p=taskProgress({...task,publication:{title:'',description:'',tags:[],scheduleAt:'2099-01-02T03:04'},coverAssetId:undefined,pkCoverAssetIds:[],coverPk:undefined,pipelineStage:'schedule'});
+ expect(p.current.label).toBe('设置并核验定时发布时间');
+ expect(p.steps.map(s=>s.id)).toContain('schedule');
 });
 
 it('keeps download settings visible even when no metadata was supplied',()=>{
