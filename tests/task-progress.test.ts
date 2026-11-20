@@ -14,10 +14,27 @@ it('stops the current stage instead of showing it as running after a timeout',()
  expect(p.current.state).toBe('stopped');
  expect(p.steps.filter(s=>s.state==='active')).toHaveLength(0);
 });
-it('keeps manual review pending after all automatic steps finish',()=>{
- const p=taskProgress({...task,pipelineStage:'review',status:'needs_attention',reason:'已核验：不允许他人下载/保存。'});
- expect(p.current.state).toBe('pending');
- expect(p.steps.slice(0,-1).every(s=>s.state==='done')).toBe(true);
+it('completes the handoff step when automation finishes',()=>{
+ const p=taskProgress({...task,pipelineStage:'review',status:'needs_attention',reason:'标题、正文已回读核验；'});
+ expect(p.current).toMatchObject({id:'review',state:'done'});
+ expect(p.steps.map(s=>s.id)).not.toContain('downloads');
+ expect(p.steps.every(s=>s.state==='done')).toBe(true);
+});
+it('recognizes earlier completed records without a stage',()=>{
+ const p=taskProgress({...task,pipelineStage:undefined,status:'needs_attention',reason:'标题、正文已回读核验；请人工检查'});
+ expect(p.current).toMatchObject({id:'review',state:'done'});
+});
+it('keeps an explicit automation failure stopped even if the copy was verified',()=>{
+ const p=taskProgress({...task,status:'needs_attention',reason:'标题、正文已回读核验；封面处理未完成'});
+ expect(p.current.state).toBe('stopped');
+ expect(p.steps.at(-1)).toMatchObject({id:'review',state:'pending'});
+});
+it('shows verified Bilibili drafts as handed off',()=>{
+ const p=taskProgress({...task,platform:'bilibili',coverAssetId:undefined,coverPk:undefined,pipelineStage:'review',status:'needs_attention',
+  completedStages:['page','transfer','upload','copy','declaration','category','draft'],
+  bilibiliDraft:{phase:'saved',cid:1,filename:'video',beforeIds:[],draftId:2}});
+ expect(p.current).toMatchObject({id:'review',state:'done'});
+ expect(p.steps.every(s=>s.state==='done')).toBe(true);
 });
 it('does not invent progress for old generic timeout records',()=>{
  const p=taskProgress({...task,pipelineStage:undefined,status:'needs_attention',reason:'等待页面确认超时'});
@@ -30,7 +47,7 @@ it('only includes relevant stages for file handoff platforms',()=>{
 });
 it('shows Bilibili metadata stage without download stage',()=>{
  const p=taskProgress({...task,platform:'bilibili',coverAssetId:undefined,pkCoverAssetIds:[],coverPk:undefined,pipelineStage:'copy'});
- expect(p.steps.map(s=>s.id)).toEqual(['page','transfer','upload','copy','declaration','review']);
+ expect(p.steps.map(s=>s.id)).toEqual(['page','transfer','upload','copy','declaration','category','review']);
  expect(p.current.label).toBe('填写并核验标题、简介和标签');
 });
 it('shows Kuaishou description and exactly two cover slots',()=>{
@@ -38,6 +55,13 @@ it('shows Kuaishou description and exactly two cover slots',()=>{
  expect(p.current.label).toBe('封面 2/2 · 上传与校验');
  expect(p.steps.find(s=>s.id==='copy')?.label).toBe('填写并核验作品描述（标题和标签）');
  expect(p.steps.some(s=>s.id==='cover-2-open')).toBe(false);
+});
+it('waits for Video Channels default covers before opening their editors',()=>{
+ const p=taskProgress({...task,platform:'weixin',pkCoverAssetIds:['portrait'],pipelineStage:'cover-0-baseline'});
+ expect(p.current.label).toBe('封面 1/2 · 等待视频号生成默认封面');
+ expect(p.current.state).toBe('active');
+ expect(p.steps.find(s=>s.id==='cover-0-open')?.state).toBe('pending');
+ expect(p.steps.findIndex(s=>s.id==='cover-0-baseline')).toBeLessThan(p.steps.findIndex(s=>s.id==='cover-0-open'));
 });
 
 it('shows the Douyin collection stage when a collection was requested',()=>{
@@ -52,12 +76,25 @@ it('shows the Xiaohongshu schedule stage when requested',()=>{
 });
 
 it('keeps download settings visible even when no metadata was supplied',()=>{
- const p=taskProgress({...task,platform:'douyin',publication:undefined,coverAssetId:undefined,coverPk:undefined,pipelineStage:'downloads'});
+ const douyin:Task={...task,platform:'douyin',publication:undefined,coverAssetId:undefined,coverPk:undefined,pipelineStage:'downloads'};
+ const p=taskProgress(douyin);
  expect(p.current.state).toBe('active');
  expect(p.steps.map(s=>s.id)).toEqual(['page','transfer','downloads','review']);
- expect(taskProgress({...task,pipelineStage:'downloads',status:'needs_attention'}).current.state).toBe('stopped');
+ expect(taskProgress({...douyin,status:'needs_attention'}).current.state).toBe('stopped');
+ const finished=taskProgress({...douyin,pipelineStage:'review',status:'needs_attention',reason:'已核验：不允许他人下载/保存。'});
+ expect(finished.current).toMatchObject({id:'review',state:'done'});
+ expect(finished.steps.every(s=>s.state==='done')).toBe(true);
 });
 
 it('does not claim download protection for earlier completed records',()=>{
- expect(taskProgress({...task,pipelineStage:'review',status:'needs_attention'}).steps.find(s=>s.id==='downloads')?.state).toBe('unknown');
+ expect(taskProgress({...task,platform:'douyin',pipelineStage:'review',status:'needs_attention'}).steps.find(s=>s.id==='downloads')?.state).toBe('unknown');
+});
+
+it('does not invent Bilibili field or cover completion from a later stage',()=>{
+ const p=taskProgress({...task,platform:'bilibili',coverPk:undefined,pkCoverAssetIds:[],pipelineStage:'review',status:'needs_attention',reason:'旧直传记录',completedStages:['page','transfer','upload']});
+ expect(p.steps.find(s=>s.id==='upload')?.state).toBe('done');
+ expect(p.current).toMatchObject({id:'review',state:'done'});
+ expect(p.steps.find(s=>s.id==='declaration')?.state).toBe('unknown');
+ expect(p.steps.map(s=>s.id)).not.toContain('draft');
+ expect(p.steps.filter(s=>s.id.startsWith('cover-')).every(s=>s.state!=='done')).toBe(true);
 });

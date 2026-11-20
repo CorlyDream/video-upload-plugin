@@ -26,10 +26,24 @@ function autofillFixture(mode) {
   <button type="submit">发布</button><button id="draft" type="button">暂存离开</button>
   </form><div class="cover-plugin-preview" aria-busy="false"><div class="cover"><div class="default" style="background-image:url(old.png)"><span class="cover-edit-entry">编辑封面</span></div></div></div>
   <div class="pk-cover-panel-switch"><input type="checkbox"></div><div id="pk-cards"></div><input class="pk-cover-list-file-input" type="file" accept=".jpg,.png"><button class="pk-cover-list-add-btn" ${mode === 'autofill-pk-delayed' ? 'disabled' : ''}>添加</button>
+  ${mode === 'autofill-declaration' ? '<div><span>原创声明</span><div class="d-switch"><input type="checkbox" hidden checked></div></div><div class="d-select-wrapper" tabindex="1"><div class="d-select-main"><span id="ai-declaration">添加内容类型声明</span></div></div>' : ''}
   <script>
   window.submissions=0;window.drafts=0;window.changes=0;window.coverChanges=0;window.earlyCoverConfirm=0;
   document.querySelector('form').onsubmit=e=>{e.preventDefault();window.submissions++};
   document.querySelector('#draft').onclick=()=>window.drafts++;
+  if('${mode}'==='autofill-declaration'){
+    window.declarationFocuses=0;
+    const select=document.querySelector('.d-select-wrapper');
+    select.addEventListener('focusin',()=>{
+      // Simulate the first attempt being interrupted by the editor's focus restoration.
+      if(++window.declarationFocuses===1){select.blur();return;}
+      const menu=document.createElement('div');
+      menu.className='declaration-drop-down';
+      menu.innerHTML='<div class="d-option" role="option">笔记含AI合成内容</div>';
+      menu.firstElementChild.onclick=()=>{document.querySelector('#ai-declaration').textContent='笔记含AI合成内容';menu.remove();};
+      document.body.append(menu);
+    });
+  }
   document.querySelector('input[type=file]').onchange=()=>{
     window.changes++;document.body.insertAdjacentHTML('beforeend','<p id="uploading">上传中 49%</p>');
     setTimeout(()=>{document.querySelector('#uploading').remove();document.body.insertAdjacentHTML('beforeend','<p>${mode === 'autofill-upload-fail' ? '上传失败' : '重新上传'}</p>');},1200);
@@ -134,7 +148,36 @@ try {
     const pages = context.pages().filter(page => page.url().startsWith('https://creator.'));
     return pages.at(-1) ?? await context.waitForEvent('page');
   }
-  if (process.argv.includes('--start-feedback')) {
+  if (!process.argv.includes('--start-feedback') && !process.argv.includes('--douyin-only')) {
+    scenario='autofill-declaration';
+    await prepare();
+    await wb.getByLabel('标题',{exact:true}).fill('小红书声明');
+    await wb.getByRole('button',{name:'开始文件交接验证'}).click();
+    const target=await targetPage();
+    await wb.getByText(/^(需你处理|插件已完成)$/).waitFor({timeout:20000});
+    assert.equal(await target.locator('#ai-declaration').innerText(),'笔记含AI合成内容');
+    assert.deepEqual(await target.evaluate(()=>({focuses:window.declarationFocuses,uploads:window.changes,submissions:window.submissions,drafts:window.drafts})),{focuses:2,uploads:1,submissions:0,drafts:0});
+    const task=await worker.evaluate(async()=>(await chrome.storage.local.get('state')).state.batch.tasks[0]);
+    assert.equal(task.pipelineStage,'review');
+    assert.equal(await wb.locator('.task .status.done').innerText(),'插件已完成');
+    const progress = wb.locator('.progress-summary');
+    assert.equal(await progress.locator('.step-state').innerText(),'已完成');
+    assert.equal(await progress.locator('progress').evaluate(meter => meter.value === meter.max),true);
+    await wb.getByRole('button',{name:/查看全部处理步骤/}).click();
+    const steps = wb.getByRole('region',{name:'全部处理步骤'});
+    assert.equal(await steps.locator('li.pending').count(),0);
+    assert.match(await steps.locator('li[aria-current="step"]').innerText(),/交接人工检查\s+已完成/);
+    await wb.keyboard.press('Escape');
+    await steps.waitFor({state:'hidden'});
+    assert.match(task.reason,/已选择 AI 生成声明/);
+    assert.doesNotMatch(task.reason,/下载\/保存/);
+    await clear(); await target.close();
+    scenario='normal';
+    console.log('PASS: Xiaohongshu declaration focus recovery and manual review without download checks');
+  }
+  if (process.argv.includes('--xiaohongshu-declaration-only')) {
+    assert.deepEqual(failures, []);
+  } else if (process.argv.includes('--start-feedback')) {
     await wb.setViewportSize({width:1100,height:760});
     await prepare();
     await wb.getByLabel('标题',{exact:true}).fill('这是一条超过二十个字符的标题用于验证错误提示位置');
@@ -181,7 +224,7 @@ try {
   await prepare();
   await wb.getByText('抖音', { exact: true }).click();
   await wb.getByRole('button', { name: '开始文件交接验证' }).click();
-  await wb.waitForFunction(() => document.querySelectorAll('.task .status').length === 2 && [...document.querySelectorAll('.task .status')].every(el => /^(需你处理|填写完成，待检查)$/.test(el.textContent)), null, { timeout: 65000 });
+  await wb.waitForFunction(() => document.querySelectorAll('.task .status').length === 2 && [...document.querySelectorAll('.task .status')].every(el => /^(需你处理|插件已完成)$/.test(el.textContent)), null, { timeout: 65000 });
   const targets = context.pages().filter(page => page.url().startsWith('https://creator.'));
   assert.equal(targets.length, 2);
   for (const page of targets) {
@@ -200,7 +243,7 @@ try {
   assert.equal(context.pages().filter(page => page.url().startsWith('https://creator.')).length, 2);
   await wb.getByRole('checkbox', {name:/^B站/}).click();
   await wb.getByRole('button', {name:'开始文件交接验证'}).click();
-  await wb.waitForFunction(()=>document.querySelectorAll('.task .status').length===3 && [...document.querySelectorAll('.task .status')].every(e=>/^(需你处理|填写完成，待检查)$/.test(e.textContent)));
+  await wb.waitForFunction(()=>document.querySelectorAll('.task .status').length===3 && [...document.querySelectorAll('.task .status')].every(e=>/^(需你处理|插件已完成)$/.test(e.textContent)));
   await wb.getByRole('checkbox', {name:/^B站/}).click();
   for (const extra of context.pages().filter(p=>p.url().startsWith('https://member.'))) await extra.close();
   await clear();
@@ -209,7 +252,7 @@ try {
   for (const test of ['existing', 'ambiguous']) {
     scenario = test; await prepare();
     await wb.getByRole('button', { name: '开始文件交接验证' }).click();
-    await wb.getByText(/^(需你处理|填写完成，待检查)$/).waitFor();
+    await wb.getByText(/^(需你处理|插件已完成)$/).waitFor();
     const page = await targetPage();
     assert.equal(await page.evaluate(() => window.changes), 0);
     assert.equal(await page.evaluate(() => window.submissions + window.drafts), 0);
@@ -247,7 +290,7 @@ try {
       const cachedAt = performance.now();
       const cached = await worker.evaluate(() => navigator.storage.estimate());
       await wb.getByRole('button', { name: '开始文件交接验证' }).click();
-      await wb.getByText(/^(需你处理|填写完成，待检查)$/).waitFor();
+      await wb.getByText(/^(需你处理|插件已完成)$/).waitFor();
       const page = await targetPage();
       await page.waitForFunction(() => window.hashes, null, { timeout: 60000 });
       const received = await page.evaluate(() => ({ size: window.fileSize, checkedBytes: window.checkedBytes, hashes: window.hashes, changes: window.changes, submissions: window.submissions, drafts: window.drafts, jsHeapBytes: performance.memory?.usedJSHeapSize }));
@@ -271,6 +314,7 @@ try {
     await wb.getByLabel('标签', {exact:true}).fill('英语启蒙,亲子英语');
     const coverFile = join(scratch, 'cover.png');
     await writeFile(coverFile, Buffer.from(await wb.evaluate(()=>{const canvas=document.createElement('canvas');canvas.width=4;canvas.height=3;canvas.getContext('2d').fillRect(0,0,4,3);return canvas.toDataURL().split(',')[1];}),'base64'));
+    assert.equal(await wb.getByLabel('选择封面图片').evaluate(element => element.closest('details') === null), true);
     if (mode !== 'autofill-no-cover') {
       await wb.getByLabel('选择封面图片').setInputFiles(coverFile);
       if(mode==='autofill-pk-multi'||mode==='autofill-pk-existing'||mode==='autofill-pk-add'||mode==='autofill-pk-delayed'){
@@ -300,7 +344,9 @@ try {
     }
     if(mode==='autofill') {
       const trigger=wb.locator('.progress-trigger');
-      await wb.waitForFunction(()=>document.querySelector('.progress-trigger')?.textContent.includes('上传与校验'));
+      await wb.waitForFunction(()=>document.querySelector('.progress-summary')?.textContent.includes('上传与校验'));
+      await wb.locator('.progress-summary').hover();
+      assert.equal(await wb.getByRole('region',{name:'全部处理步骤'}).count(),0,'扫过当前步骤摘要时不应展开详情');
       await trigger.hover();
       const panel=wb.getByRole('region',{name:'全部处理步骤'});
       await panel.waitFor();await panel.hover();
@@ -312,19 +358,19 @@ try {
       await trigger.press('Escape');await panel.waitFor({state:'hidden'});
       await trigger.click();await panel.waitFor();
       await wb.setViewportSize({width:390,height:844});
-      await wb.waitForFunction(()=>{const e=document.querySelector('.progress-panel:popover-open');if(!e)return false;const b=e.getBoundingClientRect();return b.x>=0&&b.right<=390&&b.y>=0&&b.bottom<=844;});
+      await wb.waitForFunction(()=>{const e=document.querySelector('.progress-panel');if(!e)return false;const b=e.getBoundingClientRect();return b.x>=0&&b.right<=390&&b.y>=0&&b.bottom<=844;});
       await wb.screenshot({path:'artifacts/progress-mobile.png'});
       await trigger.press('Escape');await wb.setViewportSize({width:1280,height:900});
     }
-    await wb.getByText(/^(需你处理|填写完成，待检查)$/).waitFor({timeout:45000});
+    await wb.getByText(/^(需你处理|插件已完成)$/).waitFor({timeout:45000});
     if (mode === 'autofill') {
       assert.equal(await target.getByPlaceholder('填写标题会有更多赞哦').inputValue(), '小熊洗脸');
       assert.deepEqual(await target.locator('.tiptap > p').allTextContents(), ['一起学英语','洗脸真开心','','#英语启蒙 #亲子英语']);
       assert.equal(await target.evaluate(()=>window.coverName), 'cover.png');
       assert.equal(await target.evaluate(()=>window.coverChanges), 1);
-      assert.equal(await wb.locator('.task .status').innerText(),'需你处理');
-      assert.match(await wb.locator('.task > p:not(.hint)').innerText(),/未找到下载\/保存开关/);
-      assert.match(await wb.locator('.progress-trigger').innerText(),/禁止他人下载\/保存并核验/);
+      assert.equal(await wb.locator('.task .status').innerText(),'插件已完成');
+      assert.match(await wb.locator('.progress-summary').innerText(),/交接人工检查/);
+      assert.doesNotMatch(await wb.locator('.task > p:not(.hint)').innerText(),/下载\/保存/);
       assert.equal(await target.evaluate(()=>window.earlyCoverConfirm), 0);
       assert.match(await wb.locator('.task > p:not(.hint)').innerText(), /话题/);
     } else if(mode==='autofill-pk-multi'||mode==='autofill-pk-add'||mode==='autofill-pk-delayed') {
@@ -359,7 +405,7 @@ try {
       const before=(await worker.evaluate(async()=>(await chrome.storage.local.get('state')).state)).batch;
       await target.close();
       await wb.getByRole('button',{name:'保留素材重新打开'}).click();
-      await wb.waitForFunction(()=>document.querySelectorAll('.task').length===2 && [...document.querySelectorAll('.task .status')].every(e=>e.textContent==='需你处理'),null,{timeout:45000});
+      await wb.waitForFunction(()=>document.querySelectorAll('.task').length===2 && [...document.querySelectorAll('.task .status')].every(e=>e.textContent==='插件已完成'),null,{timeout:45000});
       const reopened=await targetPage();
       assert.deepEqual(await reopened.evaluate(()=>window.coverNames),['cover.png','pk1.png','pk2.png','pk3.png']);
       const after=(await worker.evaluate(async()=>(await chrome.storage.local.get('state')).state)).batch;
@@ -376,7 +422,7 @@ try {
   await wb.getByRole('checkbox',{name:/小红书/}).uncheck();await wb.getByRole('checkbox',{name:/抖音/}).check();
   await wb.getByLabel('标题',{exact:true}).fill('抖音标题');await wb.getByLabel('内容描述',{exact:true}).fill('作品简介');
   await wb.getByRole('button',{name:'开始文件交接验证'}).click();
-  await wb.getByText('填写完成，待检查',{exact:true}).waitFor({timeout:30000});
+  await wb.getByText('插件已完成',{exact:true}).waitFor({timeout:30000});
   const dyTask=await worker.evaluate(async()=>(await chrome.storage.local.get('state')).state.batch.tasks.at(-1));
   assert.match(dyTask.reason,/已核验：不允许他人下载\/保存/);
   assert.equal(dyTask.pipelineStage,'review');

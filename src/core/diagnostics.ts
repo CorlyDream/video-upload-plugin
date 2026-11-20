@@ -1,5 +1,5 @@
 type Store = {get: (key: string)=>Promise<Record<string,unknown>>;set:(value:Record<string,unknown>)=>Promise<unknown>};
-const allowed = new Set(['count','connected','busy','active','running','command','requestId','status','step','platform','result','code','tabId','taskId','phase']);
+const allowed = new Set(['count','connected','busy','active','running','command','requestId','status','step','platform','result','code','tabId','taskId','phase','elapsedMs']);
 export function createDiagnostics(source:string,storage:Store,limit=300){
   const key=`diagnostics.${source}`;let queue=Promise.resolve();
   return {record(event:string,details:Record<string,unknown>={}){

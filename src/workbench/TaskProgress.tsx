@@ -5,50 +5,45 @@ const states:Record<StepState,string>={done:'已完成',active:'正在处理',pe
 const icons:Record<StepState,string>={done:'✓',active:'●',pending:'○',stopped:'!',unknown:'—'};
 export function TaskProgress({task}:{task:Task}) {
  const {steps,current}=taskProgress(task);
- const id=useId();const anchor=useRef<HTMLButtonElement>(null);const panel=useRef<HTMLDivElement>(null);
+ const doneCount=steps.filter(step=>step.state==='done').length;
+ const handedOff=current.id==='review'&&current.state==='done';
+ const stepCount=handedOff?steps.filter(step=>step.state!=='unknown').length:steps.length;
+ const id=useId();
+ const wrapper=useRef<HTMLDivElement>(null);
  const closeTimer=useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
- const wrapper=useRef<HTMLDivElement>(null);const [open,setOpen]=useState(false);const [pinned,setPinned]=useState(false);
+ const [open,setOpen]=useState(false);const [pinned,setPinned]=useState(false);
+ const closeSoon=()=>{if(pinned||wrapper.current?.contains(document.activeElement))return;clearTimeout(closeTimer.current);closeTimer.current=setTimeout(()=>setOpen(false),160);};
+ const keepOpen=()=>{clearTimeout(closeTimer.current);setOpen(true);};
+ const toggle=()=>{clearTimeout(closeTimer.current);if(open&&pinned){setPinned(false);setOpen(false);return;}setPinned(true);setOpen(true);};
  useEffect(()=>()=>clearTimeout(closeTimer.current),[]);
  useEffect(()=>{
-  const element=panel.current;if(!element)return;
-  if(!open){if(element.matches(':popover-open'))element.hidePopover();return;}
-  element.showPopover();
-  const position=()=>{
-   const rect=anchor.current?.getBoundingClientRect();if(!rect)return;
-   const width=Math.min(380,window.innerWidth-24);
-   const below=window.innerHeight-rect.bottom-12;const above=rect.top-12;
-   const useBelow=below>=Math.min(380,above);
-   const height=Math.min(420,window.innerHeight-24,Math.max(100,useBelow?below:above));
-   element.style.width=width+'px';element.style.maxHeight=height+'px';
-   element.style.left=Math.max(12,Math.min(rect.left,window.innerWidth-width-12))+'px';
-   const actualHeight=element.getBoundingClientRect().height;
-   const preferredTop=useBelow?rect.bottom+6:rect.top-actualHeight-6;
-   element.style.top=Math.max(12,Math.min(preferredTop,window.innerHeight-actualHeight-12))+'px';
-   element.style.bottom='auto';
-  };
-  position();window.addEventListener('resize',position);window.addEventListener('scroll',position,true);
+  if(!open||!pinned)return;
   const dismiss=(event:PointerEvent)=>{if(!wrapper.current?.contains(event.target as Node)){setOpen(false);setPinned(false);}};
-  const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'){setOpen(false);setPinned(false);}};
-  document.addEventListener('keydown',escape);document.addEventListener('pointerdown',dismiss);
-  return()=>{document.removeEventListener('keydown',escape);window.removeEventListener('resize',position);window.removeEventListener('scroll',position,true);document.removeEventListener('pointerdown',dismiss);};
- },[open]);
+  document.addEventListener('pointerdown',dismiss);
+  return()=>document.removeEventListener('pointerdown',dismiss);
+ },[open,pinned]);
  return <div className="task-progress" ref={wrapper}
-  onMouseEnter={()=>{clearTimeout(closeTimer.current);setOpen(true);}} onMouseLeave={()=>{if(!pinned&&!wrapper.current?.contains(document.activeElement))closeTimer.current=setTimeout(()=>setOpen(false),150);}}
-  onFocusCapture={()=>{clearTimeout(closeTimer.current);setOpen(true);}} onBlurCapture={event=>{if(!event.currentTarget.contains(event.relatedTarget)){setOpen(false);setPinned(false);}}}
+  onFocusCapture={keepOpen}
+  onBlurCapture={event=>{if(!event.currentTarget.contains(event.relatedTarget)&&!pinned)setOpen(false);}}
   onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();setOpen(false);setPinned(false);}}}>
-  <button ref={anchor} type="button" className="progress-trigger" aria-expanded={open} aria-controls={id}
-   onClick={()=>{setPinned(!pinned);setOpen(!pinned);}}>
+  <div className={handedOff?'progress-summary done':'progress-summary'}>
    <span className={'step-icon '+current.state} aria-hidden="true">{icons[current.state]}</span>
-   <span><span className="progress-caption">当前步骤</span><strong>{current.label}</strong></span>
-   <span className={'step-state '+current.state}>{states[current.state]}</span><span aria-hidden="true">⌄</span>
+   <span className="progress-summary-copy"><span className="progress-caption">{handedOff?'插件进度':'当前步骤'} · {doneCount}/{stepCount} 已完成</span><strong>{current.label}</strong></span>
+   <span className={'step-state '+current.state}>{states[current.state]}</span>
+   <progress className="progress-meter" max={stepCount} value={doneCount} aria-label={`处理进度：${doneCount}/${stepCount} 已完成`} />
+  </div>
+  <button type="button" className="progress-trigger" aria-expanded={open} aria-controls={id}
+   aria-label={open?'收起处理步骤':`查看全部处理步骤，已完成 ${doneCount}/${stepCount}`}
+   onMouseEnter={keepOpen} onMouseLeave={closeSoon} onClick={toggle}>
+   <span>{open?'收起步骤':'查看步骤'}</span><span aria-hidden="true">{open?'⌃':'⌄'}</span>
   </button>
-  <div id={id} ref={panel} popover="manual" className="progress-panel" role="region" aria-label="全部处理步骤" tabIndex={0}>
-   <div className="progress-panel-heading"><strong>处理步骤</strong><span>{steps.filter(s=>s.state==='done').length}/{steps.length} 已完成</span></div>
+  {open&&<div id={id} className="progress-panel" role="region" aria-label="全部处理步骤" tabIndex={0} onMouseEnter={keepOpen} onMouseLeave={closeSoon}>
+   <div className="progress-panel-heading"><strong>处理步骤</strong><span>{stepCount!==steps.length?'已记录步骤 · ':''}{doneCount}/{stepCount} 已完成</span></div>
    {current.state==='unknown'&&<p className="progress-note">旧版未保存具体步骤，无法还原执行位置。</p>}
    <ol>{steps.map(step=><li key={step.id} className={step.state} aria-current={step.id===current.id?'step':undefined}>
     <span className={'step-icon '+step.state} aria-hidden="true">{icons[step.state]}</span><span className="step-label">{step.label}</span><span className="step-state">{states[step.state]}</span>
    </li>)}</ol>
-   <p className="progress-note">停在编辑页，由你检查；不会自动发布或存草稿。</p>
-  </div>
+   <p className="progress-note">{task.platform==='bilibili'?'保存到草稿箱后由你检查；不会自动投稿。':'停在编辑页，由你检查；不会自动发布或存草稿。'}</p>
+  </div>}
  </div>;
 }

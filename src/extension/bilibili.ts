@@ -1,5 +1,5 @@
 import type {Publication} from '../core/publication';
-import type {Asset} from '../core/model';
+import type {Asset, BilibiliRejectedTag} from '../core/model';
 import type {FillContext} from './xiaohongshu';
 import {declarationVisible, ensureChecked, findDeclarationControl, findDeclarationText} from './declarations';
 
@@ -7,6 +7,79 @@ const visible = (element: Element) => element.getClientRects().length > 0 && get
 const textOf = (element: HTMLTextAreaElement | HTMLElement) => ('value' in element ? element.value : element.innerText || element.textContent || '').replace(/\r\n/g, '\n').replace(/\n+$/, '');
 const sameText = (actual: string, expected: string) => actual.replace(/\s+/g, ' ').trim() === expected.replace(/\s+/g, ' ').trim();
 type BilibiliWait = <T>(read:()=>T|undefined|false,label:string,timeout?:number)=>Promise<T>;
+type BilibiliContext = FillContext & {
+  complete?: (stage: string) => void;
+  rejectedTags?: (tags: BilibiliRejectedTag[]) => void;
+  checkTag?: (tag: string) => Promise<{accepted: boolean; reason?: string}>;
+};
+
+/** Same read-only checks used by the official TagInput before creating a tag. */
+export async function checkBilibiliTag(tag: string, signal?: AbortSignal): Promise<{accepted: boolean; reason?: string}> {
+  if (location.origin !== 'https://member.bilibili.com') throw new Error('当前不是 B 站页面，无法校验标签');
+  const checks = await Promise.all([
+    ['/x/app/h5/archive/tag/info', 'tag_name', 'msg'],
+    ['/x/vupre/web/topic/tag/check', 'tag', 'content'],
+  ].map(async ([path, key, reasonKey]) => {
+    const response = await fetch(`${path}?${key}=${encodeURIComponent(tag)}`, {
+      credentials:'include', signal:signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000),
+    });
+    const body = await response.json();
+    if (!response.ok || body.code !== 0 || !body.data || !/^-?\d+$/u.test(String(body.data.code))) throw new Error(`B 站标签“${tag}”校验失败，未跳过，请稍后继续`);
+    if (Number(body.data.code) === 0) return {accepted:true};
+    const reason = body.data[reasonKey!] ?? body.data.msg ?? body.data.content;
+    if (typeof reason !== 'string' || !reason.trim()) throw new Error(`B 站标签“${tag}”校验结果不明，未跳过`);
+    return {accepted:false, reason:reason.trim().slice(0,300)};
+  }));
+  return checks.find(check=>!check.accepted) ?? {accepted:true};
+}
+
+async function setBilibiliCategory(documentRoot: Document, wait: BilibiliWait, ctx: BilibiliContext): Promise<void> {
+  ctx.progress('正在选择并核验 B 站亲子分区', 'category');
+  const root = await wait(()=>documentRoot.querySelector<HTMLElement>('.video-human-type') ?? undefined, '等待 B 站分区控件',10000);
+  const selected = () => root.querySelector('.select-controller .select-item-cont')?.textContent?.trim();
+  if (selected() !== '亲子') {
+    const control = root.querySelector<HTMLElement>('.select-controller');
+    if (!control || !visible(control)) throw new Error('B 站分区入口不可用，请手动检查');
+    ctx.edit(()=>control.click());
+    const option = await wait(()=>{
+      const options=[...root.querySelectorAll<HTMLElement>('.drop-list-v2-item[title="亲子"]')].filter(visible);
+      return options.length===1 ? options[0] : undefined;
+    },'等待唯一亲子分区',10000);
+    ctx.edit(()=>option.click());
+  }
+  await wait(()=>selected()==='亲子','核验 B 站亲子分区',10000);
+  ctx.complete?.('category');
+}
+function visibleStatusText(documentRoot: ParentNode): string[] {
+  return [...documentRoot.querySelectorAll<HTMLElement>('*')]
+    .filter(element => visible(element) && element.children.length === 0)
+    .map(element => element.textContent?.trim() ?? '')
+    .filter(Boolean);
+}
+/** Bilibili exposes editor fields before the video upload finishes. */
+export function isBilibiliUploadComplete(documentRoot: ParentNode): boolean {
+  return visibleStatusText(documentRoot).some(text => /^(?:上传完成|上传成功|重新上传)$/u.test(text));
+}
+/**
+ * Bilibili may replace its upload input while the bridge is reading the
+ * asset. Reuse the current unique video input after that redraw, while still
+ * failing closed when the page is ambiguous or already contains content.
+ */
+export function resolveBilibiliTransferInput(candidates: HTMLInputElement[], hasExistingContent: boolean): HTMLInputElement | undefined {
+  if (hasExistingContent || candidates.length !== 1) return undefined;
+  return candidates[0];
+}
+/** Pick the input Bilibili's upload app actually listens to. */
+export function selectBilibiliUploadInput(inputs: HTMLInputElement[]): HTMLInputElement[] {
+  const videoInputs = inputs.filter(element => /video|\.mp4|\.mov|\.webm/iu.test(element.accept) && element.accept !== '.txt');
+  // The upload card owns the file chooser that was verified on the real page.
+  // Its change handler initializes editor state before handing off to UPOS.
+  const cardInputs = videoInputs.filter(element => element.closest('.bcc-upload-wrapper'));
+  // The lower-level buploader input can appear before the card. Waiting for
+  // the card avoids selecting that temporary sole candidate during startup.
+  return cardInputs;
+}
+
 function exactVisibleText(root: ParentNode, value: string): HTMLElement | undefined {
   return [...root.querySelectorAll<HTMLElement>('button,[role="button"],li,td,span,p,div')]
     .filter(visible).filter(element => element.textContent?.trim() === value)
@@ -43,7 +116,7 @@ async function setBilibiliCover(documentRoot: Document, cover: Asset, wait: Bili
   const main = documentRoot.querySelector<HTMLElement>('.cover-module-main');
   const entry = main?.querySelector<HTMLElement>('.cover-empty-pill') ?? main?.querySelector<HTMLElement>('.cover-empty');
   if (!main || !entry || !visible(entry)) throw new Error('B 站已有封面或未找到封面入口，未覆盖，请手动检查');
-  ctx.progress('正在设置 B 站封面', 'cover-open');
+  ctx.progress('正在设置 B 站封面', 'cover-0-open');
   ctx.edit(() => entry.click());
   const input = await wait(() => {
     const inputs = [...documentRoot.querySelectorAll<HTMLInputElement>('.cover-editor-panel input[type="file"]')]
@@ -68,23 +141,34 @@ async function setBilibiliCover(documentRoot: Document, cover: Asset, wait: Bili
       .filter(candidate => visible(candidate) && candidate.textContent?.trim() === '完成');
     return buttons.length === 1 ? buttons[0] : undefined;
   }, '等待 B 站封面完成按钮', 30000);
-  ctx.progress('正在确认 B 站封面', 'cover-confirm');
+  ctx.progress('正在确认 B 站封面', 'cover-0-confirm');
   ctx.edit(() => done.click());
   await wait(() => !documentRoot.querySelector('.cover-editor-panel') && !main.querySelector('.cover-empty'), '核验 B 站封面已应用', 60000);
   return 'B 站封面已应用并回读核验；';
 }
 
-async function setBilibiliTags(documentRoot: Document, tags: string[], wait: BilibiliWait, ctx: FillContext): Promise<string> {
+async function setBilibiliTags(documentRoot: Document, tags: string[], wait: BilibiliWait, ctx: BilibiliContext): Promise<string> {
+  const rejected: BilibiliRejectedTag[]=[];
+  ctx.rejectedTags?.([]);
   if (!tags.length) return '';
   const input = await wait(() => [...documentRoot.querySelectorAll<HTMLInputElement>('input[placeholder="按回车键Enter创建标签"]')].find(visible), '等待 B 站标签输入框', 30000);
-  const container = input.closest('.tag-container, .tag-input-wrp') ?? input.parentElement;
+  const container = input.closest('.tag-container, .tag-input-wrp, .input-container') ?? input.parentElement;
   if (!container) throw new Error('B 站标签控件不完整，请手动设置');
   const existing = () => [...container.querySelectorAll<HTMLElement>('.label-item-v2-content')].map(element => element.textContent?.trim() ?? '').filter(Boolean);
   const pending = tags.filter(tag => !existing().includes(tag));
-  if (existing().length + pending.length > 10) throw new Error('B 站标签最多 10 个，请减少标签后重试');
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
   if (!setter) throw new Error('无法设置 B 站标签');
+  let added=0;
   for (const tag of pending) {
+    const validation=await (ctx.checkTag ? ctx.checkTag(tag) : checkBilibiliTag(tag,ctx.signal));
+    if (ctx.signal.aborted) throw new Error('操作已停止');
+    if (!validation.accepted) {
+      if (!validation.reason) throw new Error(`B 站标签“${tag}”校验结果不明，未跳过`);
+      rejected.push({tag,reason:validation.reason});ctx.rejectedTags?.([...rejected]);
+      ctx.progress(`B 站拒绝标签“${tag}”：${validation.reason}；已跳过，继续其余标签`,'copy');
+      continue;
+    }
+    if (existing().length >= 10) throw new Error('B 站标签最多 10 个，请减少标签后重试');
     ctx.edit(() => {
       input.focus();
       setter.call(input, tag);
@@ -93,11 +177,12 @@ async function setBilibiliTags(documentRoot: Document, tags: string[], wait: Bil
       input.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
     });
     await wait(() => existing().includes(tag), `核验 B 站标签“${tag}”`, 10000);
+    added++;
   }
-  return pending.length ? `已创建 ${pending.length} 个 B 站标签；` : 'B 站标签已存在；';
+  return `${added ? `已创建 ${added} 个 B 站标签；` : '其余 B 站标签已核验；'}${rejected.length ? `已跳过平台拒绝的标签：${rejected.map(item=>item.tag).join('、')}；` : ''}`;
 }
 
-export async function fillBilibili(documentRoot: Document, publication: Publication, ctx: FillContext): Promise<string> {
+export async function fillBilibili(documentRoot: Document, publication: Publication, ctx: BilibiliContext): Promise<string> {
   const {signal, progress} = ctx;
   const wait = <T>(read: () => T | undefined | false, label: string, timeout = 600000) => new Promise<T>((resolve, reject) => {
     const started = Date.now();
@@ -114,6 +199,13 @@ export async function fillBilibili(documentRoot: Document, publication: Publicat
     signal.addEventListener('abort', abort, {once:true});
     tick();
   });
+  await wait(() => {
+    const status = visibleStatusText(documentRoot);
+    if (status.some(text => /上传失败|上传出错|视频处理失败/u.test(text))) throw new Error('B 站报告视频上传或处理失败，未填写');
+    return isBilibiliUploadComplete(documentRoot) || undefined;
+  }, '等待 B 站视频上传与处理完成');
+  ctx.complete?.('upload');
+  progress('B 站视频上传与处理已完成', 'upload');
   const fields = await wait(() => {
     const title = [...documentRoot.querySelectorAll<HTMLInputElement>('input[placeholder*="稿件标题"], input[placeholder*="标题"], input[aria-label="标题"]')].find(visible);
     const description = [...documentRoot.querySelectorAll<HTMLTextAreaElement>('textarea[placeholder*="简介"], textarea[aria-label="简介"], [contenteditable="true"][data-placeholder*="简介"], [contenteditable="true"][data-placeholder*="描述"], [contenteditable="true"]')].find(visible) as HTMLTextAreaElement | HTMLElement | undefined;
@@ -122,29 +214,39 @@ export async function fillBilibili(documentRoot: Document, publication: Publicat
   progress('已找到 B 站标题和简介输入框', 'copy');
   const existingTitle = textOf(fields.title as never).trim();
   const generatedTitle = ctx.generatedTitle?.trim();
-  if ((existingTitle && (!generatedTitle || existingTitle !== generatedTitle)) || textOf(fields.description).trim()) throw new Error('B 站编辑页已有文案，未覆盖，请手动检查');
   const body = publication.description;
+  const existingDescription = textOf(fields.description).trim();
+  const copyAlreadyMatches = existingTitle === publication.title && existingDescription === body.trim();
+  if ((existingTitle && (!copyAlreadyMatches && (!generatedTitle || existingTitle !== generatedTitle))) || (existingDescription && !copyAlreadyMatches)) throw new Error('B 站编辑页已有不同文案，未覆盖，请手动检查');
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
   const textSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-  if (!setter || (fields.description instanceof HTMLTextAreaElement && !textSetter)) throw new Error('无法设置 B 站编辑文案');
-  ctx.edit(() => {
-    setter.call(fields.title, publication.title);
-    fields.title.dispatchEvent(new Event('input', {bubbles:true}));
-    fields.title.dispatchEvent(new Event('change', {bubbles:true}));
-    if (fields.description instanceof HTMLTextAreaElement) {
-      textSetter!.call(fields.description, body);
-      fields.description.dispatchEvent(new Event('input', {bubbles:true}));
-      fields.description.dispatchEvent(new Event('change', {bubbles:true}));
-    } else {
-      fields.description.focus();
-      fields.description.textContent = body;
-      fields.description.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:body}));
-    }
-  });
+  if (!copyAlreadyMatches) {
+    if (!setter || (fields.description instanceof HTMLTextAreaElement && !textSetter)) throw new Error('无法设置 B 站编辑文案');
+    ctx.edit(() => {
+      setter.call(fields.title, publication.title);
+      fields.title.dispatchEvent(new Event('input', {bubbles:true}));
+      fields.title.dispatchEvent(new Event('change', {bubbles:true}));
+      if (fields.description instanceof HTMLTextAreaElement) {
+        textSetter!.call(fields.description, body);
+        fields.description.dispatchEvent(new Event('input', {bubbles:true}));
+        fields.description.dispatchEvent(new Event('change', {bubbles:true}));
+      } else {
+        fields.description.focus();
+        fields.description.textContent = body;
+        fields.description.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:body}));
+      }
+    });
+  } else progress('B 站文案已存在且回读一致，继续后续步骤', 'copy');
   await wait(() => fields.title.value === publication.title && sameText(textOf(fields.description), body), '核验 B 站标题和简介', 30000);
+  await setBilibiliCategory(documentRoot,wait,ctx);
   let coverNote = '';
-  if (ctx.cover) coverNote = await setBilibiliCover(documentRoot, ctx.cover, wait, ctx);
+  if (ctx.cover) {
+    coverNote = await setBilibiliCover(documentRoot, ctx.cover, wait, ctx);
+    for (const suffix of ['open','baseline','upload','confirm']) ctx.complete?.(`cover-0-${suffix}`);
+  }
+  progress('正在填写并核验 B 站标签', 'copy');
   const tagNote = await setBilibiliTags(documentRoot, publication.tags, wait, ctx);
+  ctx.complete?.('copy');
   let declaration = '';
   const originalControl = findDeclarationControl(documentRoot, ['声明原创', '原创视频']);
   if (originalControl) {
@@ -163,7 +265,51 @@ export async function fillBilibili(documentRoot: Document, publication: Publicat
       declaration += '已选择 AI 生成内容';
     }
   }
+  if (!declaration) throw new Error('B 站创作声明未核验，请手动检查');
+  ctx.complete?.('declaration');
   let scheduleNote='';
-  if(publication.scheduleAt) scheduleNote=await setBilibiliSchedule(documentRoot,publication.scheduleAt,wait,ctx);
-  return `B站标题和简介已回读核验；${coverNote}${tagNote}${declaration ? declaration + '；' : ''}${scheduleNote}${publication.tags.length && !tagNote ? '标签请检查平台控件；' : ''}请检查后手动投稿；未投稿、未保存草稿。`;
+  if(publication.scheduleAt) {
+    scheduleNote=await setBilibiliSchedule(documentRoot,publication.scheduleAt,wait,ctx);
+    if (!scheduleNote.startsWith('已设置并回读')) throw new Error(scheduleNote);
+    ctx.complete?.('schedule');
+  }
+  return `B站标题和简介已回读核验；${coverNote}${tagNote}${declaration}；${scheduleNote}请在当前编辑页检查后点击“立即投稿”。`;
+}
+/** Runs in MAIN world to read the uploader's own state. */
+export function inspectBilibiliEditor() {
+  const params = new URLSearchParams(location.search);
+  if (location.origin !== 'https://member.bilibili.com' || location.pathname !== '/platform/upload/video/frame'
+    || ['aid', 'bvid', 'type', 'draftId'].some(key => params.has(key))) {
+    throw new Error('当前不是 B 站新稿件编辑页，请手动检查');
+  }
+  const appWindow = (window as Window & {__MICRO_APP_PROXY_WINDOW__?: Window}).__MICRO_APP_PROXY_WINDOW__ ?? window;
+  type PageTask = {archive: {title?: string; desc?: string; tid?: number}; videoTasks: {status: number; cid: number; filename: string}[]};
+  type VueHost = Element & {__vue__?: {$taskConfig?: {tasks: PageTask[]}}};
+  const host = [...appWindow.document.querySelectorAll<VueHost>('*')].find(e => e.__vue__?.$taskConfig);
+  const tasks = host?.__vue__?.$taskConfig?.tasks;
+  const task = tasks?.length === 1 ? tasks[0] : undefined;
+  const video = task?.videoTasks.length === 1 ? task.videoTasks[0] : undefined;
+  if (!task || !video) throw new Error('无法核验 B 站页面的单视频上传任务');
+  if (video.status !== 3 || !Number.isSafeInteger(Number(video.cid)) || Number(video.cid) <= 0 || !video.filename) {
+    throw new Error('B 站编辑页尚未确认视频上传完成，请手动检查');
+  }
+  return {title: task.archive.title ?? '', description: task.archive.desc ?? '', tid: Number(task.archive.tid)};
+}
+
+/** Dispatch from the page realm so the uploader receives its own File/Event wrappers. */
+export function triggerBilibiliUpload(name: string, size: number): boolean | 'waiting' {
+  if (location.origin !== 'https://member.bilibili.com' || location.pathname !== '/platform/upload/video/frame') return false;
+  type UploadWindow = Window & {_profile?: {upload?: string}};
+  const appWindow = (window as Window & {__MICRO_APP_PROXY_WINDOW__?: UploadWindow}).__MICRO_APP_PROXY_WINDOW__ ?? window as UploadWindow;
+  // The card renders before initProfile() resolves, but the uploader reads the profile synchronously.
+  if (!appWindow._profile?.upload) return 'waiting';
+  const inputs = [...appWindow.document.querySelectorAll<HTMLInputElement>('.bcc-upload-wrapper input[type="file"]')]
+    .filter(input => !input.disabled && /video|\.mp4/iu.test(input.accept));
+  if (inputs.length !== 1) throw new Error(`B 站上传卡片数量不符：${inputs.length}`);
+  const input = inputs[0]!;
+  if (input.files?.length !== 1) throw new Error('B 站上传卡片尚未收到视频文件');
+  const file = input.files[0]!;
+  if (file.name !== name || file.size !== size || !size) throw new Error('B 站上传卡片的视频文件身份不符');
+  input.dispatchEvent(new Event('change', {bubbles: true}));
+  return true;
 }

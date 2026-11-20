@@ -1,22 +1,25 @@
+import {isReviewReady,taskProgress} from '../core/task-progress';
+import {keepConnectionAlive} from '../core/connection';
 import {disableDownloads} from './downloads';
 import {isDouyinUploadTransition} from '../core/platform-navigation';
 import {fillDouyin} from './douyin';
-import type { Task } from '../core/model';
+import { hasDownloadSettings, type Task } from '../core/model';
 import type { PageCommand } from '../core/protocol';
 import { hasPublication, normalizePublication } from '../core/publication';
 import { fillXiaohongshu } from './xiaohongshu';
 import { fillKuaishou } from './kuaishou';
-import { fillWeixin, openWeixinUploadEntry, weixinSearchRoots } from './weixin';
-import { fillBilibili } from './bilibili';
+import { clickWeixinOriginalConfirm, fillWeixin, openWeixinUploadEntry, weixinSearchRoots } from './weixin';
+import { fillBilibili, resolveBilibiliTransferInput, selectBilibiliUploadInput } from './bilibili';
 
 // Re-injection must never attach a second executor to the same document.
 const scope = globalThis as typeof globalThis & { __videoUploadM0?: boolean };
 if (!scope.__videoUploadM0) {
   scope.__videoUploadM0 = true;
-  chrome.runtime.onConnect.addListener(port => {
+  const onConnect = (port: chrome.runtime.Port) => {
     if (port.name !== 'upload-page') return;
     let task: Task | undefined;
     let stopped = false;
+    const stopHeartbeat = keepConnectionAlive(() => port.postMessage({type:'heartbeat'}));
     const cancellation = new AbortController();
     let ownSynchronousEdit = false;
     let iframe: HTMLIFrameElement | undefined;
@@ -28,9 +31,79 @@ if (!scope.__videoUploadM0) {
     let initialUrl = '';
     let allowUploadTransition = false;
     let uploadEntryOpened = false;
+    const progressPanelId = 'video-upload-plugin-progress';
+    const stageLabels: Record<string, string> = {
+      page: '打开并检查页面', transfer: '交接视频文件', upload: '等待视频上传与处理',
+      category: '选择并核验亲子分区',
+      copy: '填写并核验文案', pk: '设置封面 PK', declaration: '设置原创 / AI 声明', collection: '选择并核验合集',
+      schedule: '设置并核验定时发布', review: '交接人工检查', downloads: '核验下载权限',
+    };
+    const platformLabels: Record<string, string> = { xiaohongshu:'小红书', douyin:'抖音', weixin:'视频号', bilibili:'B站', kuaishou:'快手' };
+    const layoutProgressPanel = (panel: HTMLElement) => {
+      const expanded = panel.matches(':hover') || panel.matches(':focus-within');
+      panel.style.width = expanded ? '292px' : '244px';
+      panel.style.maxHeight = 'calc(100vh - 32px)';
+      panel.style.overflowY = 'auto';
+      for (const node of panel.querySelectorAll<HTMLElement>('[data-progress-detail],[data-progress-list]')) {
+        node.style.display = expanded || node.dataset.progressPersistent === 'true' ? 'block' : 'none';
+      }
+    };
+    const progressPanel = () => {
+      let panel = document.getElementById(progressPanelId);
+      if (!(panel instanceof HTMLElement)) {
+        panel = document.createElement('div'); panel.id = progressPanelId;
+        Object.assign(panel.style, { position:'fixed', top:'16px', right:'16px', zIndex:'2147483647', width:'244px', maxWidth:'calc(100vw - 58px)', maxHeight:'calc(100vh - 32px)', overflowY:'auto', padding:'9px 12px', border:'1px solid #b8cbea', borderRadius:'9px', background:'#fff', color:'#20324d', boxShadow:'0 8px 24px #244b7533', font:'12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif', transition:'width .12s ease' });
+        const host = panel;
+        host.tabIndex = 0;
+        for (const event of ['mouseenter','mouseleave','focusin','focusout']) host.addEventListener(event, () => layoutProgressPanel(host));
+        document.documentElement.append(panel);
+      }
+      return panel;
+    };
+    const updateProgress = (status: Task['status'], reason: string, pipelineStage?: string) => {
+      const panel = progressPanel();
+      const label = task?.platform === 'weixin' && /^cover-\d+-baseline$/.test(pipelineStage ?? '') ? '等待视频号生成封面' : stageLabels[pipelineStage ?? ''] ?? (pipelineStage?.startsWith('cover-') ? '处理封面' : '处理中');
+      const progressTask = task && {...task, status, reason, pipelineStage};
+      const reviewReady = progressTask && isReviewReady(progressTask);
+      const blocked = ['needs_attention','paused','aborted','failed'].includes(status) && !reviewReady;
+      const stateLabel = reviewReady ? '插件已完成，请人工检查' : status === 'failed' ? '处理失败' : status === 'paused' ? '已暂停' : status === 'aborted' ? '已停止' : blocked ? '处理已停止' : '进行中';
+      const color = blocked ? '#b42318' : reviewReady ? '#2c8b61' : '#245fc0';
+      panel.style.borderColor = blocked ? '#e6a19b' : '#b8cbea';
+      panel.style.background = blocked ? '#fff7f6' : '#fff';
+      panel.replaceChildren();
+      const title = document.createElement('div'); title.textContent = `${platformLabels[task?.platform ?? ''] ?? '平台'} · 视频上传工作台`; Object.assign(title.style, {fontSize:'10px', fontWeight:'500', lineHeight:'1.2', color:'#8090a8', marginBottom:'3px'});
+      const step = document.createElement('div'); step.textContent = blocked ? `${stateLabel}：${label}` : reviewReady ? stateLabel : `当前进度：${label}`; Object.assign(step.style, {fontSize:'13px', fontWeight:'650', lineHeight:'1.3', color});
+      const detail = document.createElement('div'); detail.dataset.progressDetail='true'; detail.dataset.progressPersistent=String(blocked); detail.textContent = reason; detail.style.cssText = 'display:none;margin-top:5px;overflow-wrap:anywhere';
+      if (blocked) detail.setAttribute('role','alert');
+      const state = document.createElement('div'); state.dataset.progressDetail='true'; state.textContent = stateLabel; state.style.marginTop = '6px'; state.style.color = color; state.style.display='none';
+      panel.append(title, step, detail, state);
+      if (progressTask) {
+        const {steps} = taskProgress(progressTask);
+        const list = document.createElement('div'); list.dataset.progressList='true'; Object.assign(list.style, {display:'none', marginTop:'10px', borderTop:'1px solid #e2e8f2', paddingTop:'7px'});
+        for (const item of steps) {
+          const row = document.createElement('div');
+          const done = item.state === 'done', active = item.state === 'active';
+          row.textContent = `${done ? '✓' : active ? '●' : '○'}  ${item.label}`;
+          row.style.cssText = `padding:3px 0;color:${done ? '#2c8b61' : active ? '#245fc0' : '#8090a8'};font-weight:${active ? '650' : '400'}`;
+          list.append(row);
+        }
+        panel.append(list);
+      }
+      const resumableStage = pipelineStage === 'upload' || pipelineStage === 'copy' || pipelineStage === 'pk' || pipelineStage === 'declaration' || pipelineStage === 'collection' || pipelineStage === 'category' || pipelineStage === 'schedule' || pipelineStage === 'review' || pipelineStage === 'downloads' || pipelineStage?.startsWith('cover-');
+      const resumable = resumableStage && ['needs_attention','paused','aborted','failed'].includes(status);
+      if (resumable) {
+        const button = document.createElement('button'); button.type = 'button'; button.textContent = '继续同步'; button.dataset.progressDetail='true'; button.dataset.progressPersistent=String(blocked);
+        Object.assign(button.style, {marginTop:'9px', padding:'5px 10px', border:'1px solid #2d67c7', borderRadius:'6px', background:'#2d67c7', color:'#fff', cursor:'pointer'});
+        button.addEventListener('click', () => { button.disabled = true; button.textContent = '正在继续…'; void chrome.runtime.sendMessage({type:'resume-sync',taskId:task?.taskId}).then((result: {ok?:boolean;error?:string}) => { if (!result?.ok) { button.disabled = false; button.textContent = '继续同步'; detail.textContent = result?.error ?? '继续同步失败'; } }); });
+        panel.append(button);
+      }
+      layoutProgressPanel(panel);
+    };
     const navigation = (window as Window & { navigation?: EventTarget }).navigation;
     const clean = () => {
+      if (stopped) return;
       stopped = true;
+      stopHeartbeat();
       cancellation.abort();
       clearTimeout(deadline);
       clearInterval(inspectTimer);
@@ -45,10 +118,13 @@ if (!scope.__videoUploadM0) {
       document.removeEventListener('change', edited, true);
       document.removeEventListener('click', clicked, true);
       window.removeEventListener('pagehide', leaving);
+      chrome.runtime.onConnect.removeListener(onConnect);
+      scope.__videoUploadM0 = false;
     };
     const report = (status: Task['status'], reason: string, pipelineStage?: string) => {
       if (!task || stopped) return;
       task = { ...task, step: task.step + 1, status, reason, pipelineStage:pipelineStage ?? task.pipelineStage };
+      updateProgress(status, reason, task.pipelineStage);
       try { port.postMessage({ type: 'checkpoint', checkpoint: task }); } catch { clean(); }
     };
     const abort = (reason: string) => { report('aborted', reason); clean(); };
@@ -74,17 +150,7 @@ if (!scope.__videoUploadM0) {
           const accept = element.accept.toLowerCase();
           return !element.disabled && accept !== '.txt' && /video|\.mp4|\.mov|\.webm/.test(accept) && !element.files?.length;
         });
-        // Bilibili keeps a second, hidden uploader input around while the
-        // upload card mounts. Prefer its named control and then the visible
-        // control; never treat the .txt input as a video target.
-        const uploadCardInput = inputs.find(element => element.closest('.bcc-upload-wrapper'));
-        if (uploadCardInput) return [uploadCardInput];
-        const namedVisible = inputs.find(element => element.name === 'buploader' && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden' && !element.closest('[id^="b-uploader-input-container_"]'));
-        if (namedVisible) return [namedVisible];
-        return inputs.sort((a, b) => {
-          const score = (element: HTMLInputElement) => (element.name === 'buploader' ? 2 : 0) + (element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden' ? 1 : 0);
-          return score(b) - score(a);
-        });
+        return selectBilibiliUploadInput(inputs);
       }
       const roots: ParentNode[] = task?.platform === 'weixin' ? weixinSearchRoots(document) : [document];
       return roots.flatMap(root => [...root.querySelectorAll<HTMLInputElement>('input[type="file"]')]).filter(element => {
@@ -110,21 +176,50 @@ if (!scope.__videoUploadM0) {
         if (location.href !== initialUrl) { navigating(); return; }
         if (event.data?.error) { report('needs_attention', '素材交接失败：' + String(event.data.error).slice(0,200)); clean(); return; }
         const asset = event.data;
-        if (!(asset?.blob instanceof Blob) || typeof asset.name !== 'string' || (!task?.videoAlreadyTransferred && (!input?.isConnected || input.files?.length || hasExistingContent() || candidates().length !== 1 || candidates()[0] !== input))) {
+        if (!task?.videoAlreadyTransferred && task?.platform === 'bilibili') {
+          // The upload card is rendered by a micro-app and can replace the
+          // input node between inspect() and bridge-ready. Re-resolve the
+          // unique current video input immediately before writing the file.
+          input = resolveBilibiliTransferInput(candidates(), hasExistingContent());
+        }
+        if (!(asset?.blob instanceof Blob) || typeof asset.name !== 'string' || (!task?.videoAlreadyTransferred && (!input?.isConnected || input.files?.length || hasExistingContent() || candidates().length !== 1 || (task?.platform !== 'bilibili' && candidates()[0] !== input)))) {
           report('needs_attention', '页面内容或视频入口发生变化，未写入文件'); clean(); return;
         }
-        // Write the video once; optional metadata uses the scoped adapter below.
+        let reason='文件已交给页面控件；尚未核验平台上传完成，请打开页面检查。';
+        const complete = (stage: string) => {
+          if (task?.platform !== 'bilibili') return;
+          task.completedStages = [...new Set([...(task.completedStages ?? []), stage])];
+        };
         try {
           if (!task?.videoAlreadyTransferred) {
           const transfer = new DataTransfer();
           transfer.items.add(new File([asset.blob], asset.name, { type: asset.type, lastModified: asset.lastModified }));
           allowUploadTransition = task?.platform === 'douyin';
           input!.files = transfer.files;
-          input!.dispatchEvent(new Event('input', { bubbles: true }));
-          if (!stopped) input!.dispatchEvent(new Event('change', { bubbles: true }));
-          if (!input!.files?.length) throw new Error('B 站上传控件未接受视频文件，请刷新上传页后重试');
+          if (task?.platform === 'bilibili') {
+            const started = Date.now();
+            let result: {ok?:boolean;pending?:boolean;error?:string};
+            do {
+              if (stopped) return;
+              result = await chrome.runtime.sendMessage({type:'bilibili-video-change',taskId:task.taskId,attemptId:task.attemptId});
+              if (!result?.pending) break;
+              await new Promise(resolve=>setTimeout(resolve,100));
+            } while (!stopped && Date.now()-started<15000);
+            if (stopped) return;
+            if (result?.pending) throw new Error('B 站上传配置尚未就绪，未触发上传');
+            if (!result?.ok) throw new Error(result?.error ?? 'B 站上传控件未接受文件');
+          } else {
+            input!.dispatchEvent(new Event('input', { bubbles: true }));
+            if (!stopped) input!.dispatchEvent(new Event('change', { bubbles: true }));
           }
-          let reason='文件已交给页面控件；尚未核验平台上传完成，请打开页面检查。';
+          complete('transfer');
+          if (task?.platform === 'bilibili' && !stopped) report('transferring', '文件已交给 B 站上传控件，等待页面确认上传与处理完成', 'upload');
+          // Some editors synchronously copy the FileList into
+          // their own uploader and clear the native input.  A cleared input
+          // therefore does not mean that the platform rejected the video;
+          // the platform-specific adapter below is responsible for waiting
+          // for the real upload-complete/editor signal.
+          }
           if (!stopped && task?.platform === 'weixin') {
             clearTimeout(deadline);
             if (task.coverAssetId && (asset.cover?.id !== task.coverAssetId || asset.cover.batchId !== task.batchId)) throw new Error('封面身份不匹配');
@@ -138,16 +233,27 @@ if (!scope.__videoUploadM0) {
                 if(!result?.ok)throw new Error(result?.error??'视频号封面操作失败');
                 return true;
               },
+              activateOriginal: async () => {
+                if (stopped || !task) return false;
+                const result=await chrome.runtime.sendMessage({type:'weixin-original-confirm',taskId:task.taskId,attemptId:task.attemptId});
+                return !!result?.ok;
+              },
             }, asset.cover, asset.pkCovers ?? []);
-          } else if (!stopped && task?.platform === 'bilibili' && (hasPublication(task.publication) || task.coverAssetId)) {
+          } else if (!stopped && task?.platform === 'bilibili') {
             clearTimeout(deadline);
             if (task.coverAssetId && (asset.cover?.id !== task.coverAssetId || asset.cover.batchId !== task.batchId)) throw new Error('封面身份不匹配');
             reason = await fillBilibili(document, normalizePublication(task.publication, false), {
               signal:cancellation.signal, progress:(reason,stage)=>report('transferring', reason, stage),
+              complete,
+              rejectedTags: tags => { if(task) task.bilibiliRejectedTags=tags; },
               generatedTitle: asset.name.replace(/\.[^.]+$/u, ''),
-              cover: task.coverAssetId ? asset.cover : undefined,
+              cover: task.coverAssetId && !task.completedStages?.includes('cover-0-confirm') ? asset.cover : undefined,
               edit(action) { ownSynchronousEdit = true; try { action(); } finally { ownSynchronousEdit = false; } },
             });
+            if (stopped) return;
+            report('transferring', '正在核验 B 站编辑页的文案和分区', 'copy');
+            const verified = await chrome.runtime.sendMessage({type: 'bilibili-verify-editor', taskId: task.taskId, attemptId: task.attemptId});
+            if (!verified?.ok) throw new Error(verified?.error ?? '无法核验 B 站编辑页，请手动检查');
           } else if (!stopped && task && ['xiaohongshu','kuaishou','douyin'].includes(task.platform) && (hasPublication(task.publication) || (task.platform === 'douyin' && task.publication?.collection) || task.coverAssetId || task.coverPk !== undefined)) {
             clearTimeout(deadline);
             if (task.coverAssetId && (asset.cover?.id !== task.coverAssetId || asset.cover?.batchId !== task.batchId)) throw new Error('封面身份不匹配');
@@ -158,7 +264,7 @@ if (!scope.__videoUploadM0) {
               edit(action) { ownSynchronousEdit = true; try { action(); } finally { ownSynchronousEdit = false; } },
             }, asset.pkCovers ?? [], task.coverPk);
           }
-          if(!stopped && task && ['xiaohongshu','kuaishou','douyin'].includes(task.platform)) {
+          if(!stopped && task && hasDownloadSettings(task.platform)) {
             clearTimeout(deadline);
             const privacy=await disableDownloads(task.platform,{signal:cancellation.signal,progress:(reason,stage)=>report('transferring',reason,stage),edit(action){ownSynchronousEdit=true;try{action();}finally{ownSynchronousEdit=false;}}});
             if(!stopped)report('needs_attention',reason+' '+privacy.message,privacy.verified?'review':'downloads');
@@ -176,7 +282,10 @@ if (!scope.__videoUploadM0) {
         return;
       }
       if (task || stopped || message.type !== 'run') return;
-      task = message.task; token = message.token; origin = message.origin; initialUrl = location.href;
+      task = message.task;
+      if (task.platform === 'bilibili') task.completedStages = [...new Set([...(task.completedStages ?? []), 'page'])];
+      token = message.token; origin = message.origin; initialUrl = location.href;
+      updateProgress(task.status, task.reason, task.pipelineStage);
       if (location.origin !== origin) { report('needs_attention', '当前页面不属于目标平台'); clean(); return; }
       document.addEventListener('input', edited, true);
       document.addEventListener('change', edited, true);
@@ -200,7 +309,7 @@ if (!scope.__videoUploadM0) {
         input = inputs[0];
         observer?.disconnect();
         clearInterval(inspectTimer);
-        report('transferring', task?.videoAlreadyTransferred ? '正在接续抖音编辑页；不会重复上传' : '正在交接素材；不代表上传完成', task?.videoAlreadyTransferred ? 'upload' : 'transfer');
+        report('transferring', task?.videoAlreadyTransferred ? '正在接续原平台编辑页；不会重复上传' : '正在交接素材；不代表上传完成', task?.videoAlreadyTransferred ? 'upload' : 'transfer');
         window.addEventListener('message', onBridge);
         iframe = document.createElement('iframe');
         iframe.hidden = true;
@@ -215,6 +324,11 @@ if (!scope.__videoUploadM0) {
       inspectTimer = setInterval(inspect, 250);
       inspect();
     });
-    port.onDisconnect.addListener(clean);
-  });
+    port.onDisconnect.addListener(() => {
+      void chrome.runtime.lastError;
+      if (!stopped && task) updateProgress('paused', '插件连接已断开，自动操作已停止；请回工作台继续同步', task.pipelineStage);
+      clean();
+    });
+  };
+  chrome.runtime.onConnect.addListener(onConnect);
 }

@@ -2,7 +2,7 @@ import {publicationBody, type Publication} from '../core/publication';
 import {inspectCover, type CoverRatio} from '../core/covers';
 import type {Asset} from '../core/model';
 import type {FillContext} from './xiaohongshu';
-import {ensureChecked, findDeclarationControl, findDeclarationText} from './declarations';
+import {checkedState, ensureChecked, findDeclarationControl, findDeclarationText} from './declarations';
 
 function visible(element: Element) { return element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden'; }
 function textOf(element: HTMLElement) { return (element.innerText || element.textContent || '').replace(/\u200b/g, '').replace(/\r\n/g, '\n').replace(/\n+$/, ''); }
@@ -62,6 +62,35 @@ function button(root: ParentNode, text: string): HTMLButtonElement | HTMLElement
     .sort((a, b) => a.children.length - b.children.length)[0];
 }
 
+/** Find the confirmation control shown after enabling the original declaration. */
+function originalDialog(documentRoot: Document): HTMLElement | undefined {
+  const selectors = '.weui-desktop-dialog,[role="dialog"],[role="alertdialog"],.weui-dialog,[class*="modal"]';
+  for (const root of weixinSearchRoots(documentRoot)) {
+    for (const dialog of [...root.querySelectorAll<HTMLElement>(selectors)].filter(element => visible(element) && !element.classList.contains('weui-desktop-dialog__wrp'))) {
+      if (!/原创/.test(dialog.textContent ?? '')) continue;
+      return dialog;
+    }
+  }
+  return undefined;
+}
+
+function originalConsent(dialog: HTMLElement): HTMLElement | undefined {
+  return [...dialog.querySelectorAll<HTMLElement>('input[type="checkbox"],[role="checkbox"]')]
+    .find(element => visible(element) && !(element as HTMLInputElement).checked && element.getAttribute('aria-checked') !== 'true');
+}
+
+function originalSubmit(dialog: HTMLElement): HTMLElement | undefined {
+  const enabled = (element: HTMLElement) => visible(element) && !(element as HTMLButtonElement).disabled && element.getAttribute('aria-disabled') !== 'true' && !element.classList.contains('weui-desktop-btn_disabled') && !element.classList.contains('is-disabled') && /^(声明原创|确认|确定|继续|我知道了|同意并继续)$/.test(element.textContent?.trim() ?? '');
+  const controls = [...dialog.querySelectorAll<HTMLElement>('button,[role="button"]')].filter(enabled);
+  return controls[0] ?? [...dialog.querySelectorAll<HTMLElement>('div,span')].filter(enabled).sort((a, b) => a.children.length - b.children.length)[0];
+}
+function clickWeixinElement(element: HTMLElement): void {
+  element.focus();
+  element.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: element.ownerDocument.defaultView}));
+  element.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: element.ownerDocument.defaultView}));
+  element.click();
+}
+
 function coverCard(documentRoot: Document, ratio: CoverRatio): {edit: HTMLElement; image: HTMLImageElement | undefined} | undefined {
   const label = ratio === '3:4' ? '个人主页卡片 3:4' : '分享卡片 4:3';
   for (const root of weixinSearchRoots(documentRoot)) {
@@ -74,7 +103,9 @@ function coverCard(documentRoot: Document, ratio: CoverRatio): {edit: HTMLElemen
         // Edit remains visible while Channels is still generating video frames,
         // but its handler ignores clicks until this blocking mask disappears.
         if ([...ancestor.querySelectorAll('.vertical-mask-layer,.horizon-mask-layer')].some(visible)) return undefined;
-        return {edit, image: ancestor.querySelector<HTMLImageElement>('img') ?? undefined};
+        const image = ancestor.querySelector<HTMLImageElement>('img');
+        if (!image?.complete || image.naturalWidth <= 0 || image.naturalHeight <= 0 || (edit as HTMLButtonElement).disabled || edit.getAttribute('aria-disabled') === 'true') return undefined;
+        return {edit, image};
       }
     }
   }
@@ -92,7 +123,40 @@ function coverModal(documentRoot: Document, ratio: CoverRatio): HTMLElement | un
 }
 
 export type WeixinCoverAction = 'open' | 'direct' | 'upload' | 'confirm';
-interface WeixinFillContext extends FillContext { activateCover?: (ratio: CoverRatio, action: WeixinCoverAction, asset?: Asset) => Promise<boolean> | boolean }
+interface WeixinFillContext extends FillContext { activateCover?: (ratio: CoverRatio, action: WeixinCoverAction, asset?: Asset) => Promise<boolean> | boolean; activateOriginal?: () => Promise<boolean> | boolean }
+
+function weixinDescription(value: Publication): string {
+  const body = publicationBody(value);
+  return [value.title, body].filter(Boolean).join('\n');
+}
+
+function setWeixinDescription(element: HTMLElement, value: string): void {
+  element.focus();
+  const doc = element.ownerDocument;
+  const selection = doc.getSelection();
+  selection?.selectAllChildren(element);
+  const inserted = doc.execCommand?.('insertText', false, value) ?? false;
+  if (!inserted || textOf(element).trim() !== value.trim()) {
+    element.replaceChildren(doc.createTextNode(value));
+    element.dispatchEvent(new InputEvent('beforeinput', {bubbles: true, inputType: 'insertText', data: value}));
+    element.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: value}));
+  }
+  element.dispatchEvent(new Event('change', {bubbles: true}));
+  element.blur();
+}
+export function clickWeixinOriginalConfirm(root: Document | ShadowRoot = document): boolean {
+  const visibleNow = (e: Element) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+  if (root instanceof Document) {
+    const frame = root.querySelector<HTMLIFrameElement>('iframe[src="https://channels.weixin.qq.com/empty.html"]');
+    if (frame?.contentDocument) return clickWeixinOriginalConfirm(frame.contentDocument);
+  }
+  for (const searchRoot of root instanceof Document ? weixinSearchRoots(root) : [root]) {
+    const dialog = [...searchRoot.querySelectorAll<HTMLElement>('.weui-desktop-dialog')].find(e => visibleNow(e) && e.textContent?.includes('原创权益'));
+    const button = dialog && [...dialog.querySelectorAll<HTMLButtonElement>('button')].find(e => visibleNow(e) && e.textContent?.trim() === '声明原创' && !e.classList.contains('weui-desktop-btn_disabled'));
+    if (button) { button.click(); return true; }
+  }
+  return false;
+}
 /** Runs in the editor iframe's MAIN world; only these four cover actions are allowed. */
 export function clickWeixinCoverControl(ratio: CoverRatio, action: WeixinCoverAction, file?: {base64:string;name:string;type:string;lastModified:number} | null, root: Document | ShadowRoot = document): boolean {
   if (!['3:4','4:3'].includes(ratio) || !['open','direct','upload','confirm'].includes(action)) return false;
@@ -135,10 +199,14 @@ async function activate(ctx: WeixinFillContext, ratio: CoverRatio, action: Weixi
   else ctx.edit(()=>target.click());
 }
 
-async function fillWeixinCover(documentRoot: Document, ratio: CoverRatio, asset: Asset, ctx: WeixinFillContext): Promise<void> {
+async function fillWeixinCover(documentRoot: Document, ratio: CoverRatio, asset: Asset, ctx: WeixinFillContext, index: number): Promise<void> {
   if (!(asset.blob instanceof Blob) || !asset.type.startsWith('image/')) throw new Error('视频号封面素材不可用');
-  const card = await waitForWeixin(() => coverCard(documentRoot, ratio), ctx, `等待视频号 ${ratio} 封面槽位`);
-  ctx.progress(`已找到视频号 ${ratio} 封面槽位`, `cover-${ratio}-open`);
+  // Upload completion exposes “删除” before Channels finishes parsing frames.
+  // Keep this separate from the short editor-open timeout: the visible edit
+  // button can still be blocked by a mask or have no generated preview yet.
+  ctx.progress(`等待视频号解析并生成 ${ratio} 默认封面；预览加载完成且编辑遮罩解除后继续（最多等待 10 分钟）`, `cover-${index}-baseline`);
+  const card = await waitForWeixin(() => coverCard(documentRoot, ratio), ctx, `等待视频号解析并生成 ${ratio} 默认封面及解除编辑遮罩`, 600000);
+  ctx.progress(`视频号 ${ratio} 默认封面已就绪，正在打开编辑器`, `cover-${index}-open`);
   const before = card.image?.currentSrc || card.image?.src || '';
   await activate(ctx,ratio,'open',card.edit);
   let directPending=false, directError: unknown;
@@ -157,12 +225,12 @@ async function fillWeixinCover(documentRoot: Document, ratio: CoverRatio, asset:
       }
     }
   }, ctx, `打开视频号 ${ratio} 封面编辑器`);
-  ctx.progress(`已打开视频号 ${ratio} 封面编辑器`, `cover-${ratio}-open`);
+  ctx.progress(`已打开视频号 ${ratio} 封面编辑器`, `cover-${index}-open`);
   const upload = button(modal, '上传封面');
   if (!upload) throw new Error(`未找到视频号 ${ratio} 封面上传入口`);
   const preview = upload.closest('.single-cover-uploader-wrap') ?? modal;
   const previousImages = new Map([...preview.querySelectorAll('img')].map(image => [image, image.currentSrc || image.src]));
-  ctx.progress(`正在上传视频号 ${ratio} 封面`, `cover-${ratio}-upload`);
+  ctx.progress(`正在上传视频号 ${ratio} 封面`, `cover-${index}-upload`);
   if (ctx.activateCover) await activate(ctx,ratio,'upload',upload,asset);
   else {
     ctx.edit(()=>upload.click());
@@ -188,7 +256,7 @@ async function fillWeixinCover(documentRoot: Document, ratio: CoverRatio, asset:
     const button = [...current.querySelectorAll<HTMLButtonElement>('button')].find(element => visible(element) && element.textContent?.trim() === '确认' && !element.disabled);
     return button;
   }, ctx, `等待视频号 ${ratio} 封面上传完成`, 120000);
-  ctx.progress(`已上传视频号 ${ratio} 封面，等待确认`, `cover-${ratio}-confirm`);
+  ctx.progress(`已上传视频号 ${ratio} 封面，等待确认`, `cover-${index}-confirm`);
   await activate(ctx,ratio,'confirm',confirm);
   await waitForWeixin(() => {
     const current = coverModal(documentRoot, ratio);
@@ -219,6 +287,24 @@ function waitForWeixin<T>(read: () => T | undefined | false, ctx: FillContext, l
 
 function weixinScheduleInput(documentRoot: Document): HTMLInputElement | undefined {
   return weixinSearchRoots(documentRoot).flatMap(root => [...root.querySelectorAll<HTMLInputElement>('input[placeholder="请选择发表时间"]')]).find(visible);
+}
+async function setWeixinCollection(documentRoot: Document, name: string, ctx: FillContext): Promise<string> {
+  const display = await waitForWeixin(() => weixinSearchRoots(documentRoot)
+    .flatMap(root => [...root.querySelectorAll<HTMLElement>('.post-album-display,.post-album-display-wrap')])
+    .find(element => visible(element) && (element.textContent?.includes('选择合集') || element.textContent?.trim() === name)), ctx, '等待视频号合集控件', 10000);
+  if (display.textContent?.trim() === name) return `已回读视频号合集 ${name}；`;
+  ctx.progress('正在选择视频号合集', 'collection');
+  ctx.edit(() => display.click());
+  const option = await waitForWeixin(() => {
+    const matches = [...new Set(weixinSearchRoots(documentRoot).flatMap(root => [...root.querySelectorAll<HTMLElement>('.post-album-wrap .option-item,.post-album-wrap .item,.post-album-wrap .name,.post-album-wrap [role="option"]')]))]
+      .filter(element => visible(element) && element.textContent?.trim() === name);
+    return matches.length === 1 ? matches[0] : undefined;
+  }, ctx, `等待视频号合集 ${name}`, 10000);
+  ctx.edit(() => option.click());
+  await waitForWeixin(() => weixinSearchRoots(documentRoot)
+    .flatMap(root => [...root.querySelectorAll<HTMLElement>('.post-album-display .display-text,.post-album-display .collection-text,.post-album-display-wrap .display-text,.post-album-display-wrap .collection-text,.post-album-display')])
+    .find(element => visible(element) && element.textContent?.trim() === name), ctx, '核验视频号合集', 10000);
+  return `已选择并回读视频号合集 ${name}；`;
 }
 async function setWeixinSchedule(documentRoot: Document, scheduleAt: string, ctx: FillContext): Promise<string> {
   const [date,time]=scheduleAt.split('T');
@@ -259,10 +345,7 @@ export async function fillWeixin(documentRoot: Document, publication: Publicatio
     tick();
   });
   const find = <T extends Element>(selector: string) => weixinSearchRoots(documentRoot).flatMap(root => [...root.querySelectorAll<T>(selector)]).find(visible);
-  const title = await wait<HTMLInputElement>(() => find<HTMLInputElement>('input[placeholder="填写短标题有机会获得更多流量"]'), '等待视频号编辑页');
-  progress('已找到视频号短标题输入框', 'copy');
-  const description = await wait<HTMLElement>(() => find<HTMLElement>('[contenteditable][data-placeholder="添加描述"]'), '等待视频号描述框');
-  progress('已找到视频号描述框', 'copy');
+  progress('等待视频号视频上传完成；随后等待平台解析和生成默认封面', 'upload');
   const uploadReady = await wait(() => weixinSearchRoots(documentRoot).some(root => {
     const completedLabel = [...root.querySelectorAll('*')].some(e => {
       if (e.children.length !== 0 || !visible(e)) return false;
@@ -272,17 +355,13 @@ export async function fillWeixin(documentRoot: Document, publication: Publicatio
     return completedLabel;
   }), '等待视频号视频处理完成', 600000);
   if (!uploadReady) throw new Error('视频号视频处理未完成');
-  progress('视频号视频已处理完成', 'upload');
+  progress('视频号视频已上传；封面操作前仍需等待平台解析并生成默认封面', 'upload');
+  const title = await wait<HTMLInputElement>(() => find<HTMLInputElement>('input[placeholder="填写短标题有机会获得更多流量"]'), '等待视频号编辑页');
+  progress('已找到视频号短标题输入框', 'copy');
+  const description = await wait<HTMLElement>(() => find<HTMLElement>('[contenteditable][data-placeholder="添加描述"]'), '等待视频号描述框');
+  progress('已找到视频号描述框', 'copy');
   const roots=weixinSearchRoots(documentRoot);
   let declarationNote='';
-  for(const root of roots){
-    const originalControl=findDeclarationControl(root,['声明原创','原创视频']);
-    if(!originalControl)continue;
-    let checked=false;
-    ctx.edit(()=>{checked=ensureChecked(originalControl);});
-    if(checked)declarationNote+='已勾选原创声明；';
-    break;
-  }
   const declarationEntry=roots.map(root=>findDeclarationText(root,['选择视频标注','选择内容标注','添加内容声明','作品声明'])).find(Boolean);
   if(declarationEntry){
     progress('正在设置视频号 AI 生成标记','declaration');
@@ -293,6 +372,28 @@ export async function fillWeixin(documentRoot: Document, publication: Publicatio
       if(option)declarationNote+='已选择 AI 生成标记；';
     }catch{declarationNote+='AI 生成标记未确认，请手动检查；';}
   }
+  for(const root of roots){
+    const originalControl=findDeclarationControl(root,['声明原创','原创视频']);
+    if(!originalControl)continue;
+    const alreadyChecked=checkedState(originalControl)===true;
+    let checked=false;
+    ctx.edit(()=>{checked=ensureChecked(originalControl);});
+    if(checked){
+      const dialog=alreadyChecked?originalDialog(documentRoot):await wait(()=>originalDialog(documentRoot),'等待视频号原创声明确认',10000);
+      if(dialog){
+        const consent=originalConsent(dialog);
+        if(consent)ctx.edit(()=>consent.click());
+        const confirm=await wait(()=>originalSubmit(dialog),'等待视频号原创声明按钮启用',10000);
+        if(ctx.activateOriginal) { if(!await ctx.activateOriginal()) throw new Error('视频号原创确认按钮未就绪'); }
+        else ctx.edit(()=>clickWeixinElement(confirm));
+        await wait(()=>!originalDialog(documentRoot),'核验视频号原创声明确认',10000);
+      }
+      declarationNote+='已勾选原创声明；';
+    }
+    break;
+  }
+  let collectionNote='';
+  if(publication.collection) collectionNote=await setWeixinCollection(documentRoot,publication.collection,ctx);
   let scheduleNote='';
   if(publication.scheduleAt) scheduleNote=await setWeixinSchedule(documentRoot,publication.scheduleAt,ctx);
   const selected = cover ? [{asset: cover, ratio: await inspectCover(cover.blob)}, ...await Promise.all(pkCovers.map(async asset => ({asset, ratio: await inspectCover(asset.blob)})))] : [];
@@ -303,22 +404,25 @@ export async function fillWeixin(documentRoot: Document, publication: Publicatio
   let coverCount = 0;
   for (const [ratio, selectedCover] of ordered) {
     if (!selectedCover) continue;
-    progress(`正在上传视频号 ${ratio} 封面`, `cover-${ratio}`);
-    await fillWeixinCover(documentRoot, ratio, selectedCover.asset, ctx);
+    await fillWeixinCover(documentRoot, ratio, selectedCover.asset, ctx, coverCount);
     coverCount++;
   }
-  if (title.value.trim() || textOf(description).trim()) throw new Error('视频号编辑页已有文案，未覆盖，请手动检查');
-  progress('填写并核验视频号短标题、视频描述', 'copy');
-  const setter = Object.getOwnPropertyDescriptor(title.constructor.prototype, 'value')?.set;
-  if (!setter) throw new Error('无法设置视频号短标题');
-  ctx.edit(() => {
-    setter.call(title, publication.title.slice(0, 16));
-    title.dispatchEvent(new Event('input', {bubbles: true}));
-    title.dispatchEvent(new Event('change', {bubbles: true}));
-    description.focus();
-    description.textContent = publicationBody(publication);
-    description.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: publicationBody(publication)}));
-  });
-  await wait(() => title.value === publication.title.slice(0, 16) && sameText(textOf(description), publicationBody(publication)), '核验视频号文案', 30000);
-  return `视频号短标题和视频描述已回读核验；${declarationNote}${scheduleNote}${coverCount ? `${coverCount} 张封面已按 3:4/4:3 槽位更新，请检查裁剪。` : ''}${publication.tags.length ? '已填写 #标签 文本，请检查平台话题。' : ''}请检查后手动发表；未发表、未保存草稿。`;
+  const finalDescription = weixinDescription(publication);
+  const expectedTitle = publication.title.slice(0, 16);
+  const existingTitle = title.value.trim(), existingDescription = textOf(description).trim();
+  const copyAlreadyMatches = existingTitle === expectedTitle && sameText(existingDescription, finalDescription);
+  if ((existingTitle || existingDescription) && !copyAlreadyMatches) throw new Error('视频号编辑页已有不同文案，未覆盖，请手动检查');
+  if (!copyAlreadyMatches) {
+    progress('填写并核验视频号短标题、视频描述', 'copy');
+    const setter = Object.getOwnPropertyDescriptor(title.constructor.prototype, 'value')?.set;
+    if (!setter) throw new Error('无法设置视频号短标题');
+    ctx.edit(() => {
+      setter.call(title, expectedTitle);
+      title.dispatchEvent(new Event('input', {bubbles: true}));
+      title.dispatchEvent(new Event('change', {bubbles: true}));
+      setWeixinDescription(description, finalDescription);
+    });
+  } else progress('视频号文案已存在且回读一致，继续后续步骤', 'copy');
+  await wait(() => title.value === publication.title.slice(0, 16) && sameText(textOf(description), finalDescription), '核验视频号文案', 30000);
+  return `视频号短标题和视频描述已回读核验；${declarationNote}${collectionNote}${scheduleNote}${coverCount ? `${coverCount} 张封面已按 3:4/4:3 槽位更新，请检查裁剪。` : ''}${publication.tags.length ? '已填写 #标签 文本，请检查平台话题。' : ''}请检查后手动发表；未发表、未保存草稿。`;
 }

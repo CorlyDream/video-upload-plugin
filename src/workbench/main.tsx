@@ -5,14 +5,15 @@ import { saveAsset, deleteBatchAssets } from '../core/assets';
 import type { WorkbenchCommand, Response, Snapshot } from '../core/protocol';
 import './style.css';
 import { TaskProgress } from './TaskProgress';
+import { isReviewReady } from '../core/task-progress';
 import { createDiagnostics, diagnosticTask } from '../core/diagnostics';
 const diagnostics = createDiagnostics('workbench',chrome.storage.local);
 void diagnostics.record('page.loaded');
 import { requestPermission } from '../core/permission-wait';
-import { keepConnectionAlive } from '../core/connection';
+import { connectWorkbench, type ConnectionState } from '../core/connection';
 import { inspectCover } from '../core/covers';
 import { normalizePublication, normalizeDouyinPublication, parseTags, scheduleWindowMs } from '../core/publication';
-import { coverPkEnabled, flattenCovers, splitCovers } from '../core/cover-order';
+import { coverPkEnabled, flattenCovers, MAX_LOCAL_COVERS, splitCovers } from '../core/cover-order';
 import { readStoredCollection, readStoredTags, restoreCollection, restoreTags, writeStoredCollection, writeStoredTags } from '../core/tag-storage';
 import { CoverPreviewList } from './CoverPreviewList';
 
@@ -31,7 +32,8 @@ function App() {
   useEffect(()=>{if(error)void diagnostics.record('ui.error',{code:error.includes('授权')?'permission':error.includes('连接')?'connection':error.includes('最多')?'validation':'operation'});},[error]);
   const feedback = useRef<HTMLParagraphElement>(null);
   useEffect(()=>{if(error){feedback.current?.scrollIntoView({block:'nearest'});feedback.current?.focus({preventScroll:true});}},[error]);
-  const [connected, setConnected] = useState(false);
+  const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
+  const connected = connectionState === 'connected';
   const [busy, setBusy] = useState(false);
   const [running, setRunning] = useState(false);
   const [title, setTitle] = useState('');
@@ -41,7 +43,7 @@ function App() {
   const [scheduleAt, setScheduleAt] = useState('');
   const [cover, setCover] = useState<Batch['cover']>();
   const [pkCovers,setPkCovers] = useState<NonNullable<Batch['pkCovers']>>([]);
-  const port = useRef<chrome.runtime.Port | null>(null);
+  const connection = useRef<ReturnType<typeof connectWorkbench> | null>(null);
   const latest = useRef<Batch | undefined>(undefined);
   const stopped = useRef(false);
   const permissionWait = useRef<AbortController | null>(null);
@@ -60,46 +62,63 @@ function App() {
     for (const wake of waiters.current) wake();
   }
   function request(command: WorkbenchCommand): Promise<Snapshot> {
-    if (!port.current) return Promise.reject(new Error('连接已断开，请重新打开工作台'));
+    const port = connection.current?.port;
+    if (!connected || !port) return Promise.reject(new Error('工作台未连接，请先恢复连接'));
     return new Promise((resolve, reject) => {
       const id = crypto.randomUUID();
       void diagnostics.record('command.sent',{command:command.type,requestId:id});
       const timer = setTimeout(() => { pending.current.delete(id); void diagnostics.record('command.timeout',{command:command.type,requestId:id}); reject(new Error('操作超时，请检查页面')); }, 30000);
       pending.current.set(id, { resolve, reject, timer });
-      try { port.current!.postMessage({ id, command }); }
+      try { port.postMessage({ id, command }); }
       catch { clearTimeout(timer); pending.current.delete(id); reject(new Error('连接已断开')); }
     });
   }
   useEffect(() => {
-    void diagnostics.record('connection.opening');
-    const connection = chrome.runtime.connect({ name: 'workbench' });
-    port.current = connection;
-    const stopHeartbeat = keepConnectionAlive(() => connection.postMessage({ type: 'heartbeat' }));
-    connection.onMessage.addListener((message: Response & { type?: string }) => {
-      if (message.snapshot) { setConnected(true); update(message.snapshot); }
-      const item = message.id ? pending.current.get(message.id) : undefined;
-      if (item) {
-        void diagnostics.record('command.reply',{requestId:message.id,result:message.ok});
-        clearTimeout(item.timer); pending.current.delete(message.id!);
-        if (message.ok) item.resolve(message.snapshot ?? {}); else item.reject(new Error(message.error));
-      } else if (message.error) setError(message.error);
+    let initialSnapshot = true;
+    let interrupted = false;
+    const session = connectWorkbench({
+      connect: () => chrome.runtime.connect({ name: 'workbench' }),
+      lastError: () => chrome.runtime.lastError?.message,
+      onEvent: (event, details) => {
+        if (event === 'connection.opening') initialSnapshot = true;
+        void diagnostics.record(event, { ...details, phase: document.visibilityState });
+      },
+      onState: state => {
+        setConnectionState(state);
+        if (state === 'connected' && interrupted) setError(previous => previous.startsWith('工作台连接') ? '工作台连接已恢复，任务不会自动继续；请检查原页面后手动继续同步。' : previous);
+      },
+      onMessage: (message: Response & { type?: string }) => {
+        if (message.snapshot) update(message.snapshot);
+        const item = message.id ? pending.current.get(message.id) : undefined;
+        if (item) {
+          void diagnostics.record('command.reply',{requestId:message.id,result:message.ok});
+          clearTimeout(item.timer); pending.current.delete(message.id!);
+          if (message.ok) item.resolve(message.snapshot ?? {}); else item.reject(new Error(message.error));
+        } else if (message.error) setError(message.error);
+        if (message.type === 'snapshot' && initialSnapshot) {
+          initialSnapshot = false;
+          // The snapshot itself establishes readiness. Do not use the initial
+          // render's request() closure, whose connected state is still false.
+          session.port?.postMessage({ id: crypto.randomUUID(), command: { type: 'get' } });
+        }
+      },
+      onDisconnect: reason => {
+        interrupted = true; permissionWait.current?.abort();
+        stopped.current = true; runningRef.current = false;
+        setRunning(false); setBusy(false); setStartPhase('');
+        const batch = latest.current;
+        if (batch) update({ batch: { ...batch, tasks: batch.tasks.map(task => isActive(task.status) ? { ...task, status: 'paused', reason: '工作台连接中断，自动操作已停止；请检查原页面后手动继续同步。' } : task) } });
+        setError(/已有工作台/.test(reason) ? reason : /context invalidated/i.test(reason) ? '插件已重新加载，请刷新工作台恢复连接；任务不会自动继续。' : '工作台连接中断，自动操作已停止。恢复连接后请手动继续同步。');
+        for (const item of pending.current.values()) { clearTimeout(item.timer); item.reject(new Error('连接已断开')); }
+        pending.current.clear(); for (const wake of waiters.current) wake();
+      },
     });
-    connection.onDisconnect.addListener(() => {
-      void diagnostics.record('connection.disconnected');
-      stopHeartbeat(); permissionWait.current?.abort();
-      void chrome.runtime.lastError;
-      port.current = null; stopped.current = true; runningRef.current = false;
-      setConnected(false); setRunning(false); setBusy(false);
-      setError('工作台连接已断开，自动操作已停止。重新打开只恢复记录。');
-      for (const item of pending.current.values()) { clearTimeout(item.timer); item.reject(new Error('连接已断开')); }
-      pending.current.clear(); for (const wake of waiters.current) wake();
-    });
-    // Wait for the initial snapshot: background initialization can be asynchronous.
-    const initial = (message: { type?: string }) => {
-      if (message.type === 'snapshot') { connection.onMessage.removeListener(initial); void request({ type: 'get' }).catch(e => setError(e.message)); }
+    connection.current = session;
+    const visible = () => {
+      void diagnostics.record('page.visibility', { phase: document.visibilityState });
     };
-    connection.onMessage.addListener(initial);
-    return () => { stopHeartbeat(); connection.disconnect(); };
+    document.addEventListener('visibilitychange', visible);
+    return () => { document.removeEventListener('visibilitychange', visible); session.close(); connection.current = null; };
   }, []);
   async function exportDiagnostics() {
     try {
@@ -113,6 +132,7 @@ function App() {
   }
   const active = batch?.tasks.some(task => isActive(task.status));
   const metadataLocked = !connected || !batch || busy || running || active || !!batch.tasks.length;
+  const pendingPlatforms = selected.filter(id => !batch?.tasks.some(task => task.platform === id));
   async function chooseCover(files: File[]) {
     if (!files.length || !batch || metadataLocked) return;
     setBusy(true); setError('');
@@ -121,7 +141,7 @@ function App() {
       // selected image remains the main cover; later images become PK covers.
       const existing = flattenCovers(cover, pkCovers);
       const total = existing.length + files.length;
-      if (total > 4) throw new Error('最多选择 4 张封面（1 张主封面 + 3 张 PK）');
+      if (total > MAX_LOCAL_COVERS) throw new Error('最多从本地添加到 4 张封面');
       for (const file of files) {
       if (!['image/jpeg','image/png','image/webp'].includes(file.type) || !file.size || file.size > 20*1024*1024) throw new Error('封面支持 JPG、PNG、WebP，最大 20 MiB');
       if (total > 1 && !['image/jpeg','image/png'].includes(file.type)) throw new Error('多封面请选择 JPG 或 PNG');
@@ -208,6 +228,13 @@ function App() {
     catch(error){setError(error instanceof Error?error.message:'重新打开失败，素材仍保留');}
     finally{runningRef.current=false;setRunning(false);setStartPhase('');}
   }
+  async function resume(taskId:string) {
+    if(runningRef.current || busy || active)return;
+    runningRef.current=true;stopped.current=false;setRunning(true);setError('');setStartPhase('正在原平台页面继续同步，已上传视频不会重复上传…');
+    try {await request({type:'resume',taskId});await waitForHandoff();}
+    catch(error){setError(error instanceof Error?error.message:'继续同步失败，素材仍保留');}
+    finally{runningRef.current=false;setRunning(false);setStartPhase('');}
+  }
   async function stop() {
     stopped.current = true; permissionWait.current?.abort();
     for (const wake of waiters.current) wake();
@@ -220,47 +247,64 @@ function App() {
     finally { setBusy(false); }
   }
   return <main>
-    <header><div className="brand">视频上传工作台</div><span className="edition">多平台填表实验版</span></header>
-    <section className="intro"><h1>上传、填表，最后由你检查。</h1><p>小红书、抖音和视频号填写标题、正文和标签；快手作品描述仅用标题，换行后填写前 4 个标签；B 站填写标题、简介、平台标签和单张封面。平台有合集或定时控件时会按名称或时间填写并回读；没有对应控件的平台会跳过。平台话题与裁剪结果需要你确认。</p></section>
-    <div className="workspace">
-      <section className="source" aria-labelledby="source-title"><h2 id="source-title">本次素材</h2>
-        <label className="file-picker"><span>{batch ? batch.asset.name : '选择本地视频'}</span>
+    <a className="skip-link" href="#workspace">跳到填写区域</a>
+    <header>
+      <div className="brand-lockup"><span className="brand-mark" aria-hidden="true">↗</span><div><div className="brand">视频上传工作台</div><span className="edition">快速填表 · 手动发布</span></div></div>
+      <div className="connection-controls"><span className={`connection-pill ${connected ? 'is-connected' : ''}`} role="status"><span aria-hidden="true" />{{ connecting: '正在连接…', connected: '已连接', reconnecting: '正在重新连接…', disconnected: '连接已断开' }[connectionState]}</span>{connectionState === 'disconnected' && <button type="button" onClick={() => connection.current?.reconnect()}>重新连接</button>}</div>
+    </header>
+    <section className="intro" aria-labelledby="page-title"><p className="eyebrow">VIDEO WORKBENCH</p><h1 id="page-title">准备好内容，交给平台填写。</h1><p className="intro-copy">按顺序完成 3 步，上传和填写完成后在各平台编辑页检查。</p><ol className="flow-steps" aria-label="操作步骤"><li className="is-current"><span>1</span>选择素材</li><li><span>2</span>填写内容</li><li><span>3</span>交接并检查</li></ol></section>
+    <div className="workspace" id="workspace">
+      <section className="source" aria-labelledby="source-title">
+        <div className="section-heading"><div><p className="section-kicker">STEP 1–2</p><h2 id="source-title">素材与内容</h2></div><span className="required-note">均为可选</span></div>
+        <label className={`file-picker ${batch ? 'has-file' : ''}`}>
+          <span className="file-picker-icon" aria-hidden="true">{batch ? '✓' : '↑'}</span><span className="file-picker-copy"><strong>{batch ? batch.asset.name : '选择视频文件'}</strong><small>{batch ? '素材已准备，可继续填写' : '支持 MP4、MOV 等视频格式'}</small></span>
           <input aria-label="选择本地视频" type="file" accept="video/*" disabled={!connected || busy || !!batch} onChange={event => { void choose(event.target.files?.[0]); event.target.value = ''; }} />
         </label>
-        {batch && <p className="file-info">{(batch.asset.size / 1024 / 1024).toFixed(1)} MiB · 仅缓存于此浏览器</p>}
+        {batch && <p className="file-info"><span aria-hidden="true">●</span> {(batch.asset.size / 1024 / 1024).toFixed(1)} MiB · 仅缓存于此浏览器</p>}
         <fieldset className="publication-fields" disabled={metadataLocked}>
-          <legend>文案与封面</legend>
-          <label>标题<input aria-label="标题" value={title} onChange={e=>setTitle(e.target.value)} placeholder="小红书最多 20 字，不会自动截断" /></label>
-          <label>内容描述<textarea aria-label="内容描述" rows={5} value={description} onChange={e=>setDescription(e.target.value)} placeholder="小红书正文与标签合计最多 1000 字；快手不使用正文" /></label>
-          <label>标签<textarea aria-label="标签" rows={2} value={tags} onChange={e=>setTags(e.target.value)} placeholder="逗号、换行或 # 分隔；小红书最多 10 个，快手取前 4 个" /></label>
-          <p className="hint">标签将以 #标签 文本填入正文；平台话题候选需要你确认。留空的字段不填写。</p>
-          <label>合集名称（平台支持时）<input aria-label="合集名称" value={collection} onChange={e=>setCollection(e.target.value)} placeholder="填写后按名称选择平台已有合集" /></label>
-          <p className="hint">支持合集的平台会查找名称完全相同的已有合集并回读选择结果；没有合集控件的平台会跳过。</p>
-          <label>定时发布时间（平台支持时）<span className="schedule-controls"><input aria-label="定时发布时间" type="datetime-local" value={scheduleAt} min={localDateTimeValue(60_000)} max={localDateTimeValue(scheduleWindowMs)} onChange={e=>setScheduleAt(e.target.value)} /><button type="button" onClick={()=>setScheduleAt('')} disabled={!scheduleAt}>清理定时</button></span></label>
-          <p className="hint">有定时控件的平台会设置并回读日期和时间；没有对应控件的平台会跳过。只能设置未来 7 天内的时间。仍需你最后检查并点击发布；清理后不会设置定时发布。</p>
-          <label>可选封面<input aria-label="选择封面图片" type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={e=>{void chooseCover(Array.from(e.target.files ?? []));e.target.value='';}} /></label>
-          <CoverPreviewList items={flattenCovers(cover, pkCovers)} disabled={metadataLocked} onChange={updateCoverOrder} />
-          <p className="hint">最多 4 张。第一次选择的图片自动作为主封面，之后继续选择的图片会按顺序追加为 PK 候选；不需要单独开启开关。只支持 4:3 和 3:4。快手两种比例各取一张；只有一种比例时随机取两张（只有一张则用一张），重试沿用所选图片。抖音按横/竖比例各取第一张，没有的比例保留平台默认。不选择时保留平台默认封面。自定义封面使用平台默认裁剪，遇到额外裁剪步骤时交给你处理。</p>
+          <legend><span>填写内容</span><small>留空字段会跳过</small></legend>
+          <label><span className="field-label">标题 <small>{title.length}/20</small></span><input name="title" autoComplete="off" aria-label="标题" value={title} onChange={e=>setTitle(e.target.value)} placeholder="例如：今天的工作记录…" /></label>
+          {!!batch?.externalImport?.candidateTitles.length && <label>
+            <span className="field-label">候选标题</span>
+            <select value="" onChange={event => setTitle(event.target.value)}>
+              <option value="" disabled>选择候选标题</option>
+              {batch.externalImport.candidateTitles.map(value => <option key={value}>{value}</option>)}
+            </select>
+          </label>}
+          <label><span className="field-label">内容描述 <small>{description.length} 字</small></span><textarea name="description" autoComplete="off" aria-label="内容描述" rows={4} value={description} onChange={e=>setDescription(e.target.value)} placeholder="写下这条视频的重点…" /></label>
+          <label><span className="field-label">标签 <small>用逗号或换行分隔</small></span><textarea name="tags" autoComplete="off" aria-label="标签" rows={2} value={tags} onChange={e=>setTags(e.target.value)} placeholder="#日常，工作记录…" /></label>
+          <div className="field-grid">
+            <label>
+              <span className="field-label">合集名称</span>
+              <input name="collection" autoComplete="off" aria-label="合集名称" aria-describedby="collection-help" value={collection} onChange={e=>setCollection(e.target.value)} placeholder="平台上已有的合集名称" />
+              <small id="collection-help" className="hint">小红书、抖音、视频号按名称匹配已有合集，留空时跳过。</small>
+            </label>
+            <label><span className="field-label">定时发布时间 <small>未来 7 天内</small></span><span className="schedule-controls"><input name="scheduleAt" aria-label="定时发布时间" type="datetime-local" value={scheduleAt} min={localDateTimeValue(60_000)} max={localDateTimeValue(scheduleWindowMs)} onChange={e=>setScheduleAt(e.target.value)} /><button type="button" onClick={()=>setScheduleAt('')} disabled={!scheduleAt} aria-label="清除定时发布时间">清除</button></span></label>
+          </div>
+          <div className="cover-options"><label><span className="field-label">封面图 <small>本地添加最多 4 张</small></span><input aria-label="选择封面图片" type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={e=>{void chooseCover(Array.from(e.target.files ?? []));e.target.value='';}} /></label><CoverPreviewList items={flattenCovers(cover, pkCovers)} disabled={metadataLocked} onChange={updateCoverOrder} /><p className="hint">第一张是主图，后续是 PK 候选。小红书使用前 4 张，请在平台页面检查裁剪效果。</p></div>
+          <details className="advanced-options"><summary>平台填写说明</summary><div className="advanced-content"><p className="hint">标签会以 #文本 填入正文；合集与定时控件只在平台支持时填写并回读。</p></div></details>
         </fieldset>
-        <h2>目标平台</h2><p className="hint">小红书、快手、抖音、视频号和 B 站支持实验性填表，其余平台仅交接视频；均需在原页面检查。支持 PK 的平台会使用全部封面；不支持 PK 的平台只使用第一张主封面。</p><p className="hint">快手、抖音默认禁止他人下载/保存。小红书、视频号和 B 站暂未找到对应开关，会提示人工检查。</p>
-        <fieldset disabled={running || active || busy}><legend className="sr-only">选择目标平台</legend>
-          {platforms.map(platform => <label className="platform" key={platform.id}>
-            <input type="checkbox" checked={selected.includes(platform.id)} onChange={event => { const checked = event.currentTarget.checked; setSelected(ids => checked ? [...ids, platform.id] : ids.filter(id => id !== platform.id)); }} />
-            <span>{platform.name}</span><small>{batch?.tasks.some(task => task.platform === platform.id) ? '已尝试' : '待验证'}</small>
-          </label>)}
-        </fieldset>
-        <p className="hint" data-testid="start-diagnostics">诊断版 2026-11-09.10 · {startClicks ? `已收到 ${startClicks} 次开始点击` : '尚未收到开始点击'}</p>
-        <button type="button" onClick={()=>void exportDiagnostics()}>导出诊断日志</button>
-        {error && <p ref={feedback} tabIndex={-1} role="alert" className="error">{error}</p>}
-        {running && <p role="status" className="hint">{startPhase}</p>}
-        <button className="primary" onClick={() => void start()} disabled={!connected || !batch || running || active || busy || !selected.some(id => !batch.tasks.some(task => task.platform === id))}>开始文件交接验证</button>
-        {(running || active) && <button className="stop" onClick={() => void stop()}>停止并接管页面</button>}
-        <p className="hint">运行时保持工作台打开。平台收到素材后可能继续上传；停止操作不会撤回已传数据。</p>
+        <section className="platform-picker" aria-labelledby="platform-title"><div className="section-heading"><div><p className="section-kicker">STEP 3</p><h2 id="platform-title">选择目标平台</h2></div><span className="selection-count">{pendingPlatforms.length} 个待交接</span></div><p className="hint">可多选。已完成的平台会自动跳过。</p>
+          <fieldset disabled={running || active || busy}><legend className="sr-only">选择目标平台</legend><div className="platform-grid">{platforms.map(platform => <label className={`platform ${selected.includes(platform.id) ? 'is-selected' : ''}`} key={platform.id}><input type="checkbox" checked={selected.includes(platform.id)} onChange={event => { const checked = event.currentTarget.checked; setSelected(ids => checked ? [...ids, platform.id] : ids.filter(id => id !== platform.id)); }} /><span className="platform-check" aria-hidden="true">{selected.includes(platform.id) ? '✓' : ''}</span><span>{platform.name}</span><small>{batch?.tasks.some(task => task.platform === platform.id) ? '已尝试' : '待验证'}</small></label>)}</div></fieldset>
+        </section>
+        <div className="action-bar">
+          {error && <p ref={feedback} tabIndex={-1} role="alert" className="error">{error}</p>}
+          {running && <p role="status" className="running-status"><span className="spinner" aria-hidden="true" />{startPhase}</p>}
+          <button className="primary" onClick={() => void start()} disabled={!connected || !batch || running || active || busy || !selected.some(id => !batch.tasks.some(task => task.platform === id))}>开始文件交接验证</button>
+          {(running || active) && <button className="stop" onClick={() => void stop()}>停止并接管页面</button>}
+          <p className="action-note">运行时保持工作台打开 · 发布仍由你确认</p>
+        </div>
+        <details open className="utility-actions"><summary>工具与诊断</summary><div><button type="button" onClick={()=>void exportDiagnostics()}>导出诊断日志</button></div></details><p className="hint diagnostics" data-testid="start-diagnostics">诊断版 2026-11-09.10 · {startClicks ? `已收到 ${startClicks} 次开始点击` : '尚未收到开始点击'}</p>
       </section>
-      <section className="results" aria-labelledby="results-title"><h2 id="results-title">平台记录</h2>
-        <p className="boundary">发布由你操作。插件不会点击发布或存草稿。</p>
-          <div aria-live="polite">{!batch?.tasks.length ? <div className="empty"><span className="empty-symbol" aria-hidden="true">↗</span><h3>还没有交接记录</h3><p>选择素材和平台后开始。已打开的编辑页面会保留，方便你检查。</p></div> : batch.tasks.map(task => <article className="task" key={task.taskId}><div className="task-heading"><h3>{platforms.find(p=>p.id===task.platform)?.name}</h3><span className={`status ${isActive(task.status) ? 'active' : ''}`}>{task.status === 'needs_attention' && task.pipelineStage !== 'downloads' && (task.reason.startsWith('标题、正文已回读核验；') || task.reason.startsWith('作品描述已回读核验') || task.reason.startsWith('抖音标题、简介已回读核验；') || task.reason.startsWith('视频号短标题和视频描述已回读核验；') || task.reason.startsWith('B站标题和简介已回读核验；')) ? '填写完成，待检查' : task.status === 'needs_attention' && /超时|等待超过/.test(task.reason) ? '等待超时，已停止' : labels[task.status]}</span></div><TaskProgress task={task}/><p>{task.reason}</p><button onClick={() => void request({ type: 'open', taskId: task.taskId }).catch(e => setError(e.message))}>打开页面</button>{batch.tasks.filter(item=>item.platform===task.platform).at(-1)?.taskId===task.taskId && <><button disabled={!connected || running || active || busy} onClick={()=>void retry(task.taskId)}>保留素材重新打开</button><p className="hint">仅原标签页已关闭时可用；会重新上传并填写，沿用本次视频、文案和封面。</p></>}</article>)}</div>
-        {batch && <footer><button disabled={busy || running || active} onClick={() => void clear()}>结束并清理素材与记录</button><p className="hint">只清理插件缓存，平台页面和已上传的素材由你管理。</p></footer>}
+      <section className="results" aria-labelledby="results-title"><div className="results-heading"><div><p className="section-kicker">LIVE STATUS</p><h2 id="results-title">平台记录</h2></div><span className="record-count">{batch?.tasks.length ?? 0} 条记录</span></div>
+        <p className="boundary"><span aria-hidden="true">✓</span><span><strong>最后一步由你完成</strong><small>上传和填写完成后保留编辑页，由你手动发布。</small></span></p>
+        <div aria-live="polite">{!batch?.tasks.length ? <div className="empty"><span className="empty-symbol" aria-hidden="true">✦</span><h3>准备开始</h3><p>选择视频、填写内容并勾选平台，交接记录会显示在这里。</p></div> : batch.tasks.map(task => { const latestForPlatform = batch.tasks.filter(item=>item.platform===task.platform).at(-1)?.taskId===task.taskId; const canResume = latestForPlatform && (task.platform !== 'bilibili' || !!task.completedStages) && task.bilibiliDraft?.phase !== 'saved' && (!!task.documentId || !!task.bilibiliDraft) && ['needs_attention','paused','aborted','failed'].includes(task.status) && (task.pipelineStage === 'upload' || task.pipelineStage === 'copy' || task.pipelineStage === 'pk' || task.pipelineStage === 'declaration' || task.pipelineStage === 'collection' || task.pipelineStage === 'category' || task.pipelineStage === 'schedule' || task.pipelineStage === 'review' || task.pipelineStage === 'downloads' || task.pipelineStage === 'draft' || task.pipelineStage?.startsWith('cover-'));
+          const reviewReady = isReviewReady(task);
+          const statusLabel = reviewReady
+            ? (task.bilibiliDraft?.phase === 'saved' ? '草稿已保存' : '插件已完成')
+            : task.status === 'needs_attention' && /超时|等待超过/.test(task.reason) ? '等待超时，已停止' : labels[task.status];
+          return <article className="task" key={task.taskId}><div className="task-heading"><h3>{platforms.find(p=>p.id===task.platform)?.name}</h3><span className={`status ${reviewReady ? 'done' : isActive(task.status) ? 'active' : ''}`}>{statusLabel}</span></div><TaskProgress task={task}/><p>{task.reason}</p><div className="task-actions"><button onClick={() => void request({ type: 'open', taskId: task.taskId }).catch(e => setError(e.message))}>{task.bilibiliDraft?.draftId ? '打开草稿' : '打开页面'}</button>{canResume && <button disabled={!connected || running || active || busy} onClick={()=>void resume(task.taskId)}>{task.bilibiliDraft ? '核验草稿保存结果' : '继续同步（不重复上传）'}</button>}{latestForPlatform && !task.bilibiliDraft && <button disabled={!connected || running || active || busy} onClick={()=>void retry(task.taskId)}>保留素材重新打开</button>}</div>{latestForPlatform && <p className="hint">{task.bilibiliDraft ? '草稿保存记录已保留；结果不明时只读核验，不会重复上传或再次创建。' : '继续同步复用原平台页面和已上传视频；原页面关闭后再用“保留素材重新打开”。'}</p>}</article>})}</div>
+        {batch && <footer><button disabled={busy || running || active} onClick={() => void clear()}>结束并清理素材与记录</button><p className="hint">只清理插件缓存，平台页面和已上传素材由你管理。</p></footer>}
       </section>
     </div>
   </main>;

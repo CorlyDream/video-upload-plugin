@@ -1,3 +1,5 @@
+import {readBilibiliDrafts,findBilibiliDraft,verifyBilibiliDraft} from '../src/extension/bilibili-draft';
+import {inspectBilibiliEditor,triggerBilibiliUpload} from '../src/extension/bilibili';
 import {clickWeixinCoverControl} from '../src/extension/weixin';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
@@ -7,6 +9,7 @@ import { isActive, platforms, acceptCheckpoint } from '../src/core/model';
 import { createDiagnostics, diagnosticCode } from '../src/core/diagnostics';
 import {authorizeClaim,approveBridge,consumeGrant} from '../src/core/authorization';
 import {selectKuaishouCovers} from '../src/core/covers';
+import { MAX_LOCAL_COVERS } from '../src/core/cover-order';
 import { normalizePublication, hasPublication, normalizeDouyinPublication } from '../src/core/publication';
 
 // Run the actual worker entrypoint with Chrome events under explicit test control.
@@ -33,20 +36,27 @@ function port(tabId: number, name = 'workbench') {
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 async function settle() { await tick(); await tick(); }
 
-function worker(initialization: Promise<void> = Promise.resolve(), splitInitialNavigation = false, emitCreationNavigation = true) {
+function worker(initialization: Promise<void> = Promise.resolve(), splitInitialNavigation = false, emitCreationNavigation = true, importedPkIds: string[] = []) {
   const page = port(7, 'upload-page');
   let tabUrl = 'about:blank';
   let tabStatus = 'loading';
   const chrome = {
     runtime: {
       id: 'review', getURL: (path: string) => `chrome-extension://review/${path}`,
-      onConnect: event(), onMessage: event(),
+      onConnect: event(), onMessage: event(), onMessageExternal: event(),
     },
     webNavigation: { onBeforeNavigate: event(), onCreatedNavigationTarget:event() },
     storage: { local: {
       setAccessLevel: () => initialization,
-      get: async () => ({ state: { batch: { id: 'batch', asset: { id: 'asset' }, tasks: [] } } }),
-      set: async () => {},
+      get: async () => ({ state: { batch: {
+        id: 'batch', asset: { id: 'asset' }, tasks: [],
+        ...(importedPkIds.length && {
+          externalImport: { origin: 'http://127.0.0.1', requestId: 'import', candidateTitles: [] },
+          cover: { id: 'cover' },
+          pkCovers: importedPkIds.map(id => ({ id })),
+        }),
+      } } }),
+      set: async (_value: unknown) => {},
     } },
     permissions: { contains: async () => true },
     tabs: {
@@ -72,15 +82,16 @@ function worker(initialization: Promise<void> = Promise.resolve(), splitInitialN
       },
       connect: (tabId:number) => tabId===7?page:port(tabId,'upload-page'),
     },
-    scripting: { executeScript: async () => [{ documentId: 'document-after-user-refresh' }] },
+    scripting: { executeScript: async (_options: unknown) => [{ documentId: 'document-after-user-refresh' }] },
     action: { onClicked: event() },
   };
   const source = readFileSync(new URL('../src/extension/background.ts', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '');
   runInNewContext(stripTypeScriptTypes(source), {
+    inspectBilibiliEditor,readBilibiliDrafts,findBilibiliDraft,verifyBilibiliDraft,triggerBilibiliUpload, Set, Date,
     clickWeixinCoverControl, Error, authorizeClaim,approveBridge,consumeGrant,createDiagnostics, diagnosticCode, chrome, URL, crypto, setTimeout, clearTimeout, console,
-    inspectCover:async(blob:string)=>blob==='pk2'?'3:4':'4:3',selectKuaishouCovers,
-    isActive, platforms, acceptCheckpoint, normalizePublication, hasPublication, normalizeDouyinPublication, readAsset: async (_batch: string, id: string) => ['cover','pk1','pk2','pk3'].includes(id) ? ({id, blob:id,batchId:'batch', type:'image/jpeg', size:200}) : ({}),
+    inspectCover:async(blob:string)=>blob==='pk2'?'3:4':'4:3',selectKuaishouCovers, MAX_LOCAL_COVERS,
+    isActive, platforms, acceptCheckpoint, normalizePublication, hasPublication, normalizeDouyinPublication, readAsset: async (_batch: string, id: string) => ['cover','pk1','pk2','pk3','pk4'].includes(id) ? ({id, blob:id,batchId:'batch', type:'image/jpeg', size:200}) : ({}),
   });
   return {
     chrome, page,
@@ -100,6 +111,20 @@ describe('worker lifecycle races', () => {
     expect(harness.page.messages.filter(m=>m.type==='run')).toHaveLength(1);
     harness.chrome.tabs.onUpdated.emit(7,{url,status:'complete'},{url});await settle();
     expect(harness.page.messages.filter(m=>m.type==='stop')).toHaveLength(0);
+    wb.disconnect();await settle();
+  });
+  it('rebinds continue-sync to a refreshed document in the same platform tab',async()=>{
+    const h=worker(),wb=port(1);h.chrome.runtime.onConnect.emit(wb);await settle();
+    wb.onMessage.emit({id:'start',command:{type:'start',platform:'xiaohongshu'}});await settle();
+    const url=platforms[0].origin+platforms[0].path;h.navigate(url,'complete');await settle();
+    const first=h.page.messages.find(m=>m.type==='run').task;
+    h.page.onMessage.emit({type:'checkpoint',checkpoint:{...first,step:first.step+1,status:'needs_attention',reason:'封面处理中'}});await settle();
+    const respond=vi.fn();
+    h.chrome.runtime.onMessage.emit({type:'resume-sync',taskId:first.taskId},{id:'review',tab:{id:first.tabId},frameId:0,documentId:'refreshed-doc',url},respond);
+    await settle();
+    expect(respond).toHaveBeenCalledWith({ok:true});
+    expect(h.page.messages.filter(m=>m.type==='run')).toHaveLength(2);
+    expect(h.page.messages.at(-1)?.task.documentId).toBe('document-after-user-refresh');
     wb.disconnect();await settle();
   });
   it('opens the platform directly without a second tab update',async()=>{
@@ -177,6 +202,32 @@ describe('worker lifecycle races', () => {
     expect(harness.page.messages.find(m=>m.type==='run')?.task.coverPk).toBe(true);
     wb.disconnect();await settle();
   });
+  it.each([
+    { platform: 'xiaohongshu', expectedPk: ['pk1', 'pk3', 'pk4'] },
+    { platform: 'weixin', expectedPk: ['pk2'] },
+  ])('keeps all imported covers in the batch and selects the supported slots for $platform', async ({ platform, expectedPk }) => {
+    const imported = ['pk1', 'pk2', 'pk3', 'pk4'];
+    const reordered = ['pk1', 'pk3', 'pk4', 'pk2'];
+    const harness = worker(undefined, false, true, imported);
+    const wb = port(1);
+    harness.chrome.runtime.onConnect.emit(wb);
+    await settle();
+    wb.onMessage.emit({ id: 'configure', command: {
+      type: 'configure', publication: {}, coverAssetId: 'cover', pkCoverAssetIds: reordered, coverPk: true,
+    } });
+    await settle();
+    const configured = wb.messages.find(message => message.id === 'configure');
+    expect(configured.ok).toBe(true);
+    expect(configured.snapshot.batch.pkCovers.map((cover: {id: string}) => cover.id)).toEqual(reordered);
+
+    wb.onMessage.emit({ id: 'start', command: { type: 'start', platform } });
+    await settle();
+    const task = wb.messages.find(message => message.id === 'start')?.snapshot.batch.tasks[0];
+    expect(task.coverAssetId).toBe('cover');
+    expect(task.pkCoverAssetIds).toEqual(expectedPk);
+    wb.disconnect();
+    await settle();
+  });
   it('freezes publication and validated cover into the launched task', async () => {
     const harness = worker(); const wb = port(1);
     harness.chrome.runtime.onConnect.emit(wb); await settle();
@@ -219,6 +270,20 @@ describe('worker lifecycle races', () => {
     expect(retried.uploadTabId).toBeUndefined();
     expect(retried.coverAssetId).toBe(task.coverAssetId);expect(retried.pkCoverAssetIds).toEqual(task.pkCoverAssetIds);
     wb.disconnect();await settle();
+  });
+  it('keeps the first alternate ratio for Weixin cover slots', async () => {
+    const harness = worker(); const wb = port(1);
+    harness.chrome.runtime.onConnect.emit(wb); await settle();
+    wb.onMessage.emit({id:'config',command:{type:'configure',publication:{},coverAssetId:'cover',pkCoverAssetIds:['pk1','pk2'],coverPk:true}});
+    await settle();
+    expect(wb.messages.find(m=>m.id==='config')?.ok).toBe(true);
+    wb.onMessage.emit({id:'start',command:{type:'start',platform:'weixin'}}); await settle();
+    harness.navigate(platforms.find(platform=>platform.id==='weixin')!.origin + platforms.find(platform=>platform.id==='weixin')!.path,'complete');
+    await settle();
+    const task = harness.page.messages.find(m=>m.type==='run')?.task;
+    expect(task.coverAssetId).toBe('cover');
+    expect(task.pkCoverAssetIds).toEqual(['pk2']);
+    wb.disconnect(); await settle();
   });
   it('adopts only its own authorized Douyin popup after file delivery',async()=>{
     const h=worker(),wb=port(1);h.chrome.runtime.onConnect.emit(wb);await settle();
@@ -324,5 +389,110 @@ describe('worker lifecycle races', () => {
     workbench.disconnect();
     await settle();
     expect(runs).toEqual([]);
+  });
+});
+
+
+describe('Bilibili manual submission handoff', () => {
+  const url = 'https://member.bilibili.com/platform/upload/video/frame';
+  async function started() {
+    const h = worker(Promise.resolve(), false, false);
+    const wb = port(1);
+    h.chrome.runtime.onConnect.emit(wb);
+    await settle();
+    wb.onMessage.emit({id:'start',command:{type:'start',platform:'bilibili'}});
+    await settle();
+    const {task, token} = h.page.messages.find(message => message.type === 'run');
+    const bridge = {id:'review',tab:{id:task.tabId},frameId:1,documentId:'bridge',url:'chrome-extension://review/bridge.html#'+token};
+    const claim = vi.fn();
+    h.chrome.runtime.onMessage.emit({type:'bridge-claim',token},bridge,claim);
+    await settle();
+    const {claimId} = claim.mock.calls[0]![0];
+    h.page.onMessage.emit({type:'approve',token,claimId});
+    await settle();
+    const consume = vi.fn();
+    h.chrome.runtime.onMessage.emit({type:'bridge-consume',token,claimId},bridge,consume);
+    await settle();
+    expect(consume).toHaveBeenCalledWith(expect.objectContaining({ok:true}));
+
+    const filled = {...task,step:task.step+1,status:'transferring',reason:'正在核验编辑页',pipelineStage:'copy',
+      completedStages:['page','transfer','upload','copy','declaration','category']};
+    h.page.onMessage.emit({type:'checkpoint',checkpoint:filled});
+    await settle();
+    const sender = {id:'review',tab:{id:task.tabId},frameId:0,documentId:task.documentId,url};
+    const request = {type:'bilibili-verify-editor',taskId:task.taskId,attemptId:task.attemptId};
+    return {...h,wb,filled,sender,request};
+  }
+
+  it('verifies and leaves the original editor available for manual submission', async () => {
+    const h = await started();
+    const execute = vi.spyOn(h.chrome.scripting,'executeScript').mockResolvedValue([{result:{title:'',description:'',tid:193}}] as any);
+    const update = vi.spyOn(h.chrome.tabs,'update');
+    const create = vi.spyOn(h.chrome.tabs,'create');
+    const respond = vi.fn();
+    h.page.onMessage.emit({type:'bilibili-save-draft'});
+    h.chrome.runtime.onMessage.emit(h.request,{...h.sender,documentId:'stale'},respond);
+    await settle();
+    expect(respond).toHaveBeenCalledWith(expect.objectContaining({ok:false}));
+    expect(execute).not.toHaveBeenCalled();
+    h.chrome.runtime.onMessage.emit(h.request,h.sender,respond);
+    await settle();
+    expect(respond).toHaveBeenLastCalledWith({ok:true});
+    expect(execute).toHaveBeenCalledExactlyOnceWith({
+      target:{tabId:h.filled.tabId,documentIds:[h.filled.documentId]},world:'MAIN',func:inspectBilibiliEditor,
+    });
+    h.page.onMessage.emit({type:'checkpoint',checkpoint:{...h.filled,step:h.filled.step+1,status:'needs_attention',pipelineStage:'review'}});
+    await settle();
+    const task = h.wb.messages.filter(m => m.type === 'snapshot').at(-1).snapshot.batch.tasks[0];
+    expect(task).toMatchObject({status:'needs_attention',pipelineStage:'review',tabId:h.filled.tabId});
+    expect(task.bilibiliDraft).toBeUndefined();
+    expect(task.completedStages).not.toContain('draft');
+    expect(await h.chrome.tabs.get()).toMatchObject({url});
+    expect(update).not.toHaveBeenCalled();
+
+    h.wb.onMessage.emit({id:'open',command:{type:'open',taskId:task.taskId}});
+    await settle();
+    expect(update).toHaveBeenCalledExactlyOnceWith(task.tabId,{active:true});
+    expect(create).not.toHaveBeenCalled();
+    h.wb.disconnect();
+    await settle();
+  });
+
+  it.each([
+    [{title:'merged',description:'',tid:193},'未同步'],
+    [{title:'',description:'',tid:21},'亲子'],
+  ])('does not confirm an editor with mismatched page data', async (result, error) => {
+    const h = await started();
+    vi.spyOn(h.chrome.scripting,'executeScript').mockResolvedValue([{result}] as any);
+    const respond = vi.fn();
+    h.chrome.runtime.onMessage.emit(h.request,h.sender,respond);
+    await settle();
+    expect(respond).toHaveBeenCalledWith({ok:false,error:expect.stringContaining(error)});
+    h.wb.disconnect();
+    await settle();
+  });
+
+  it('still reconciles an old draft checkpoint using only a read', async () => {
+    const h = worker();
+    const wb = port(1);
+    const task = {
+      batchId:'batch',taskId:'old',attemptId:'old',assetId:'asset',platform:'bilibili',tabId:7,
+      documentId:'doc',step:5,status:'paused',reason:'旧版保存结果待核验',pipelineStage:'draft',
+      bilibiliDraft:{phase:'saving',cid:123,filename:'file',beforeIds:[],draftId:2,categoryTid:193},
+    };
+    vi.spyOn(h.chrome.storage.local,'get').mockResolvedValue({state:{batch:{id:'batch',asset:{id:'asset'},tasks:[task]}}} as any);
+    h.navigate(url,'complete');
+    const execute = vi.spyOn(h.chrome.scripting,'executeScript').mockResolvedValue([{
+      result:{id:2,title:'',desc:'',tid:193,videos:[{cid:123,filename:'file'}]},
+    }] as any);
+    h.chrome.runtime.onConnect.emit(wb);
+    await settle();
+    wb.onMessage.emit({id:'resume',command:{type:'resume',taskId:task.taskId}});
+    await settle();
+    expect(execute).toHaveBeenCalledExactlyOnceWith({target:{tabId:7},func:readBilibiliDrafts,args:[2]});
+    const snapshot = wb.messages.filter(message => message.type === 'snapshot').at(-1).snapshot;
+    expect(snapshot.batch.tasks[0].bilibiliDraft).toMatchObject({phase:'saved',draftId:2});
+    wb.disconnect();
+    await settle();
   });
 });

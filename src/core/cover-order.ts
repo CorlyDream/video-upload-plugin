@@ -1,5 +1,7 @@
 import type { AssetMeta } from './model';
 
+export const MAX_LOCAL_COVERS = 4;
+
 export function flattenCovers(cover: AssetMeta | undefined, pkCovers: AssetMeta[] = []): AssetMeta[] {
   return cover ? [cover, ...pkCovers] : [];
 }

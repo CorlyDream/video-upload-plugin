@@ -94,19 +94,23 @@ export async function fillDouyin(value:Publication,cover:Asset|undefined,ctx:Fil
   const reupload=[...document.querySelectorAll('label,button,div')].some(e=>e.children.length===0&&e.textContent==='重新上传'&&visible(e));
   return title&&body&&reupload&&card('4:3')&&card('3:4')?{title,body}:undefined;
  },'upload','等待抖音编辑页和视频就绪',600000);
- guard();if(fields.title.value.trim()||copyText(fields.body).trim())throw new Error('抖音编辑页已有文案，未覆盖，请手动检查');
- progress('填写抖音标题、作品简介和标签','copy');
- Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(fields.title,publication.title);
- fields.title.dispatchEvent(new Event('input',{bubbles:true}));fields.title.dispatchEvent(new Event('change',{bubbles:true}));
  const body=publicationBody(publication);
- if(body){
-  fields.body.focus();
-  ctx.edit(()=>{
-   const data=new DataTransfer();data.setData('text/plain',body);
-   const accepted=!fields.body.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
-   if(!accepted)throw new Error('抖音简介编辑器未接收粘贴，已停止');
-  });
- }
+ const existingTitle=fields.title.value.trim(), existingBody=copyText(fields.body).trim();
+ const copyAlreadyMatches=existingTitle===publication.title&&existingBody===body.trim();
+ if((existingTitle||existingBody)&&!copyAlreadyMatches)throw new Error('抖音编辑页已有不同文案，未覆盖，请手动检查');
+ if(!copyAlreadyMatches){
+  progress('填写抖音标题、作品简介和标签','copy');
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(fields.title,publication.title);
+  fields.title.dispatchEvent(new Event('input',{bubbles:true}));fields.title.dispatchEvent(new Event('change',{bubbles:true}));
+  if(body){
+   fields.body.focus();
+   ctx.edit(()=>{
+    const data=new DataTransfer();data.setData('text/plain',body);
+    const accepted=!fields.body.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
+    if(!accepted)throw new Error('抖音简介编辑器未接收粘贴，已停止');
+   });
+  }
+ } else progress('抖音文案已存在且回读一致，继续后续步骤','copy');
 
  const verify=()=>{if(!fields.title.isConnected||!fields.body.isConnected||fields.title.value!==publication.title||copyText(fields.body)!==body.replace(/\n+$/,''))throw new Error('抖音文案回读不一致，不会重复填写');return true;};
  await wait(verify,'copy','核验抖音文案',30000,true);

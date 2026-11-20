@@ -21,9 +21,38 @@ try {
  assert.match(scheduleResult,/已设置并回读视频号定时发布时间/);
  assert.equal(await schedulePage.locator('input[placeholder="请选择发表时间"]').inputValue(),'2026-11-15 12:30');
  await schedulePage.close();
+ const collectionPage=await browser.newPage();
+ await collectionPage.setContent('<div>重新上传</div><input placeholder="填写短标题有机会获得更多流量"><div contenteditable data-placeholder="添加描述"></div><div class="post-album-wrap"><div class="post-album-display"><div class="display-text">选择合集</div></div><div class="filter-wrap" style="display:none"><div class="option-item"><div class="item"><div class="name">英语启蒙</div><div class="desc">共20个内容</div></div></div></div></div>');
+ await collectionPage.evaluate(()=>{const wrap=document.querySelector('.post-album-wrap'),display=wrap.querySelector('.post-album-display'),filter=wrap.querySelector('.filter-wrap'),item=wrap.querySelector('.option-item');display.onclick=()=>filter.style.display='block';item.onclick=()=>{display.querySelector('.display-text').textContent='英语启蒙';filter.style.display='none';};});
+ await collectionPage.addScriptTag({content:code});
+ const collectionResult=await collectionPage.evaluate(async()=>wx.fillWeixin(document,{title:'合集测试',description:'说明',tags:[],collection:'英语启蒙'},{signal:new AbortController().signal,edit:fn=>fn(),progress:()=>{}}));
+ assert.match(collectionResult,/已选择并回读视频号合集 英语启蒙/);
+ assert.equal(await collectionPage.locator('.display-text').textContent(),'英语启蒙');
+ await collectionPage.close();
+ const originalPage=await browser.newPage();
+ await originalPage.setContent('<div>重新上传</div><label><input id="original" type="checkbox"><span>声明原创</span></label><input placeholder="填写短标题有机会获得更多流量"><div contenteditable data-placeholder="添加描述"></div>');
+ await originalPage.evaluate(()=>{
+  window.originalConfirmations=0;
+  document.querySelector('#original').addEventListener('change',()=>{
+   const dialog=document.createElement('div');dialog.setAttribute('role','dialog');dialog.innerHTML='<h2>原创权益</h2><div>平台将保护你的作品并获得原创标记。</div><label><input id="original-consent" type="checkbox">我已阅读并同意《原创声明须知》和《使用条款》</label><button>取消</button><button id="original-confirm" class="weui-desktop-btn_disabled">声明原创</button>';
+   document.body.append(dialog);
+   dialog.querySelector('#original-consent').addEventListener('change',event=>{dialog.querySelector('#original-confirm').classList.toggle('weui-desktop-btn_disabled',!event.target.checked);});
+   dialog.querySelector('#original-confirm').onclick=()=>{window.originalConfirmations++;dialog.remove();};
+  });
+ });
+ await originalPage.addScriptTag({content:code});
+ const originalResult=await originalPage.evaluate(async()=>{
+  const controller=new AbortController();
+  try{return {reason:await wx.fillWeixin(document,{title:'原创测试',description:'说明',tags:[]},{signal:controller.signal,edit:fn=>fn(),progress:()=>{}})}}
+  catch(error){return {error:error.message};}
+ });
+ assert.equal(await originalPage.evaluate(()=>window.originalConfirmations),1);
+ assert.match(originalResult.reason,/已勾选原创声明/);
+ await originalPage.close();
  for (const surface of ['iframe','shadow']) for (const order of ['portrait-first','landscape-first']) {
   const page=await browser.newPage();
-  await page.setContent(`<div class="cover-card vertical-cover-wrap" data-ratio="3:4"><div><div>个人主页卡片</div><div>3:4</div></div><div><button class="edit-btn">编辑</button><img src="portrait-default"></div></div><div class="cover-card horizon-cover-wrap" data-ratio="4:3"><div><div>分享卡片</div><div>4:3</div></div><div><button class="edit-btn">编辑</button><img src="landscape-default"></div></div><video src="processing.mp4" hidden></video><div id="processing">处理中</div><input placeholder="填写短标题有机会获得更多流量"><div contenteditable data-placeholder="添加描述"></div>`);
+  const defaultPreview='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+  await page.setContent(`<div class="cover-card vertical-cover-wrap" data-ratio="3:4"><div><div>个人主页卡片</div><div>3:4</div></div><div><button class="edit-btn">编辑</button><img src="${defaultPreview}#portrait-default"></div></div><div class="cover-card horizon-cover-wrap" data-ratio="4:3"><div><div>分享卡片</div><div>4:3</div></div><div><button class="edit-btn">编辑</button><img src="${defaultPreview}#landscape-default"></div></div><video src="processing.mp4" hidden></video><div id="processing">处理中</div><input placeholder="填写短标题有机会获得更多流量"><div contenteditable data-placeholder="添加描述"></div>`);
   await page.evaluate(surface=>{
    if(surface==='shadow'){
     const contents=document.body.innerHTML;document.body.innerHTML='';
@@ -97,6 +126,6 @@ try {
  await page.evaluate(mode=>{window.submissions=0;for(const b of document.querySelectorAll('button'))b.onclick=()=>window.submissions++;const d=document.querySelector('iframe').contentDocument;if(mode==='existing')d.querySelector('input[placeholder]').value='原稿';},mode);
  const result=await page.evaluate(async mode=>{const d=document.querySelector('iframe').contentDocument;const c=new AbortController();if(mode==='cancel')c.abort();else setTimeout(()=>c.abort(),10000);try{return {reason:await wx.fillWeixin(d,{title:'小熊洗脸',description:'和小熊一起学习洗脸的英语表达。',tags:['英语启蒙','亲子英语']},{signal:c.signal,edit:fn=>fn(),progress:()=>{}})}}catch(e){return {error:e.message}}},mode);
  const state=await page.evaluate(()=>{const d=document.querySelector('iframe').contentDocument;return {title:d.querySelector('input[placeholder]').value,description:d.querySelector('[contenteditable]').innerText,submissions,iframe:true}});
- assert.equal(state.submissions,0);if(mode==='success'){assert.match(result.reason,/已回读核验/);assert.equal(state.title,'小熊洗脸');assert.equal(state.description.replace(/\s+/g,' ').trim(),'和小熊一起学习洗脸的英语表达。 #英语启蒙 #亲子英语')}else assert.ok(result.error);
+ assert.equal(state.submissions,0);if(mode==='success'){assert.match(result.reason,/已回读核验/);assert.equal(state.title,'小熊洗脸');assert.equal(state.description.replace(/\s+/g,' ').trim(),'小熊洗脸 和小熊一起学习洗脸的英语表达。 #英语启蒙 #亲子英语')}else assert.ok(result.error);
  console.log('WEIXIN',mode,result);await page.close();
  }} finally {await browser.close()}

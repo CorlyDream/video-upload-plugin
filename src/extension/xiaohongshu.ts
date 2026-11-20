@@ -1,6 +1,6 @@
 import { publicationBody, type Publication } from '../core/publication';
 import type { Asset } from '../core/model';
-import {ensureChecked, findDeclarationControl, findDeclarationText} from './declarations';
+import {checkedState, declarationDisabled, declarationVisible, ensureChecked, findDeclarationControl, findDeclarationText, selectAiDeclaration} from './declarations';
 
 export interface FillContext { signal: AbortSignal; progress: (reason: string, stage?: string) => void; edit: (action: () => void) => void; generatedTitle?: string; cover?: Asset }
 const titleSelector = 'input[placeholder="填写标题会有更多赞哦"]';
@@ -45,9 +45,16 @@ function scheduleDisplay(scheduleAt: string) {
   return scheduleAt.replace('T', ' ');
 }
 function collectionTrigger(): HTMLElement | undefined {
-  const controls = [...document.querySelectorAll<HTMLElement>('.collection-plugin-button')].filter(visible);
+  // The live editor changes the trigger class after a collection is selected:
+  // the initial empty state uses `.collection-plugin-button`, while the
+  // selected state is rendered as `.collection-plugin-choose`. Treat both as
+  // the same control so a completed selection can be read back immediately.
+  const controls = [...document.querySelectorAll<HTMLElement>('.collection-plugin-button,.collection-plugin-choose')].filter(visible);
   if (controls.length > 1) throw new Error('小红书合集控件不唯一，请手动设置');
   return controls[0];
+}
+function collectionValue(trigger: HTMLElement): string {
+  return compactText(trigger.querySelector<HTMLElement>('.collection-name')?.textContent ?? trigger.textContent ?? '');
 }
 function collectionOption(name: string): HTMLElement | undefined {
   const expected = compactText(name);
@@ -64,15 +71,15 @@ export async function selectXiaohongshuCollection(name: string, context: Pick<Fi
   const trigger = collectionTrigger();
   if (!trigger) return '小红书编辑页没有合集控件，已跳过合集设置；';
   progress('正在选择小红书合集', 'collection');
-  const current = compactText(trigger.textContent ?? '');
+  const current = collectionValue(trigger);
   if (current.includes(expected) && !current.includes('选择合集')) return `已回读小红书合集“${expected}”；`;
   edit(() => trigger.click());
   const option = await waitFor(() => collectionOption(name), signal, 10000, false, '等待小红书同名合集');
-  edit(() => option.click());
+  edit(() => (option.querySelector<HTMLElement>('.item-label') ?? option).click());
   await waitFor(() => {
     const updated = collectionTrigger();
     if (!updated) return false;
-    const text = compactText(updated.textContent ?? '');
+    const text = collectionValue(updated);
     return text.includes(expected) && !text.includes('选择合集');
   }, signal, 10000, true, '核验小红书合集选择');
   return `已选择并回读小红书合集“${expected}”；`;
@@ -132,7 +139,8 @@ export function waitFor<T>(read: () => T | undefined | false, signal: AbortSigna
     let timer: ReturnType<typeof setInterval>;
     let remaining = timeout;
     let lastTick = Date.now();
-    let wasVisible = !onVisibility || document.visibilityState === 'visible';
+    const pageVisible = () => !onVisibility || document.visibilityState === 'visible' || document.hasFocus?.() === true;
+    let wasVisible = pageVisible();
     let announced: boolean | undefined;
     const clean = () => { clearInterval(timer); signal.removeEventListener('abort', abort); if(onVisibility)document.removeEventListener('visibilitychange',inspect); };
     const abort = () => { clean(); reject(new Error('操作已停止')); };
@@ -142,7 +150,7 @@ export function waitFor<T>(read: () => T | undefined | false, signal: AbortSigna
         const now = Date.now();
         if(wasVisible)remaining -= now-lastTick;
         lastTick=now;
-        wasVisible=!onVisibility || document.visibilityState === 'visible';
+        wasVisible=pageVisible();
         if(onVisibility && announced!==wasVisible){announced=wasVisible;onVisibility(wasVisible);}
         if(!wasVisible)return;
         const result = read();
@@ -185,6 +193,46 @@ function coverMedia(modal: HTMLElement): string {
   }
   return JSON.stringify(parts);
 }
+const coverProofs = ((globalThis as typeof globalThis & {__xhCoverProofs?: Record<string,string>}).__xhCoverProofs ??= {});
+async function imageMatchesAsset(image: HTMLImageElement, asset: Asset, signal: AbortSignal): Promise<boolean> {
+  if (!image.complete || !image.naturalWidth) return false;
+  const src = image.currentSrc || image.src;
+  if (!/^(blob:|data:image\/)/.test(src)) return false;
+  const response = await fetch(src, {signal});
+  if (!response.ok) return false;
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength !== asset.blob.size) return false;
+  const hash = async (data: ArrayBuffer) => new Uint8Array(await crypto.subtle.digest('SHA-256',data)).toString();
+  return await hash(bytes) === await hash(await asset.blob.arrayBuffer());
+}
+async function selectCoverRatio(modal: HTMLElement, asset: Asset, context: Pick<FillContext,'signal'|'edit'>) {
+  const cropTab = [...modal.querySelectorAll<HTMLElement>('button,div,span')].filter(visible).find(e=>compactText(e.textContent ?? '')==='裁剪' && ![...e.children].some(c=>compactText(c.textContent ?? '')==='裁剪'));
+  if (cropTab) context.edit(()=>cropTab.click());
+  const selector = modal.matches('.cover-modal,.pk-cover-list-editor-modal') ? '.ratio-option' : '.crop-ratio-item';
+  if (cropTab) await waitFor(()=>modal.querySelector(selector),context.signal,10000,false,'等待封面裁剪比例');
+  const options=[...modal.querySelectorAll<HTMLElement>(selector)].filter(visible);
+  if (!options.length) return;
+  const bitmap=await createImageBitmap(asset.blob);
+  const desired=bitmap.width>bitmap.height?'4:3':bitmap.width<bitmap.height?'3:4':'1:1';bitmap.close();
+  const matches=options.filter(e=>compactText(e.textContent ?? '')===desired);
+  if(matches.length!==1)throw new Error('封面裁剪比例入口不唯一，未保存');
+  const option=matches[0]!;
+  if(!option.classList.contains('active')&&!option.classList.contains('crop-ratio-item-active')) context.edit(()=>option.click());
+  await waitFor(()=>option.classList.contains('active')||option.classList.contains('crop-ratio-item-active'),context.signal,10000,true,'核验封面裁剪比例');
+}
+function legacyCoverModal(): HTMLElement | undefined {
+  const candidates = [...document.querySelectorAll<HTMLElement>('.d-modal')]
+    .filter(visible)
+    .filter(modal => compactText(modal.textContent ?? '').includes('设置封面') && !!modal.querySelector('.btn-confirm'));
+  if (candidates.length > 1) throw new Error('小红书旧版封面弹窗不唯一，请手动处理');
+  return candidates[0];
+}
+function deferClick(context: Pick<FillContext, 'edit'>, element: HTMLElement) {
+  // Xiaohongshu performs synchronous crop/encode work from the legacy confirm
+  // handler. Let the bridge message return before entering that handler so a
+  // slow platform render cannot make the automation channel look hung.
+  context.edit(() => setTimeout(() => { if (element.isConnected) element.click(); }, 0));
+}
 export async function fillXiaohongshu(publication: Publication, cover: Asset | undefined, context: FillContext, pkCovers: Asset[] = [], coverPk?: boolean): Promise<string> {
   const {signal, progress} = context;
   progress('视频已交接，等待平台完成上传后填写','upload');
@@ -199,27 +247,34 @@ export async function fillXiaohongshu(publication: Publication, cover: Asset | u
     return {title, body};
   }, signal, 10 * 60 * 1000, false, '视频上传与处理');
   guard(signal);
-  if (fields.title.value.trim() || fields.body.textContent?.trim()) throw new Error('编辑页已有文案，未覆盖，请手动检查');
-  progress('平台上传已完成，正在填写标题和正文','copy');
-  if (publication.title) {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(fields.title, publication.title);
-    fields.title.dispatchEvent(new Event('input', {bubbles:true}));
-    fields.title.dispatchEvent(new Event('change', {bubbles:true}));
-  }
-  guard(signal);
   const bodyText = publicationBody(publication);
-  if (bodyText) {
-    fields.body.focus();
-    // Use the editor's native editing path, never manufacture ProseMirror internal nodes.
-    context.edit(() => {
-      const lines = bodyText.split('\n');
-      const lineCommand = fields.body.firstElementChild?.tagName === 'P' ? 'insertParagraph' : 'insertLineBreak';
-      for (let index = 0; index < lines.length; index++) {
-        if (index && !document.execCommand(lineCommand)) throw new Error('正文编辑器不接受换行，请手动检查');
-        if (lines[index] && !document.execCommand('insertText', false, lines[index])) throw new Error('正文编辑器不接受自动输入，请手动填写');
-      }
-    });
-    fields.body.dispatchEvent(new Event('input', {bubbles:true}));
+  const existingTitle = fields.title.value.trim();
+  const existingBody = editorText(fields.body);
+  const copyAlreadyMatches = existingTitle === publication.title && existingBody === bodyText.replace(/\n+$/, '');
+  if ((existingTitle || existingBody) && !copyAlreadyMatches) throw new Error('编辑页已有不同文案，未覆盖，请手动检查');
+  if (!copyAlreadyMatches) {
+    progress('平台上传已完成，正在填写标题和正文','copy');
+    if (publication.title) {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(fields.title, publication.title);
+      fields.title.dispatchEvent(new Event('input', {bubbles:true}));
+      fields.title.dispatchEvent(new Event('change', {bubbles:true}));
+    }
+    guard(signal);
+    if (bodyText) {
+      fields.body.focus();
+      // Use the editor's native editing path, never manufacture ProseMirror internal nodes.
+      context.edit(() => {
+        const lines = bodyText.split('\n');
+        const lineCommand = fields.body.firstElementChild?.tagName === 'P' ? 'insertParagraph' : 'insertLineBreak';
+        for (let index = 0; index < lines.length; index++) {
+          if (index && !document.execCommand(lineCommand)) throw new Error('正文编辑器不接受换行，请手动检查');
+          if (lines[index] && !document.execCommand('insertText', false, lines[index])) throw new Error('正文编辑器不接受自动输入，请手动填写');
+        }
+      });
+      fields.body.dispatchEvent(new Event('input', {bubbles:true}));
+    }
+  } else {
+    progress('平台文案已存在且回读一致，继续后续步骤','copy');
   }
   const verifyCopy = () => {
     if (!fields.title.isConnected || !fields.body.isConnected || fields.title.value !== publication.title || editorText(fields.body) !== bodyText.replace(/\n+$/, '')) throw new Error('标题或正文回读不一致，请检查页面，不会重复填写');
@@ -227,18 +282,47 @@ export async function fillXiaohongshu(publication: Publication, cover: Asset | u
   // Separate a browser event turn so framework rerenders cannot be mistaken for acceptance.
   await waitFor(() => { verifyCopy(); return true; }, signal, 30000, true);
   let declarationNote='';
-  const originalControl=findDeclarationControl(document,['声明原创','原创视频']);
-  if(originalControl){let checked=false;context.edit(()=>{checked=ensureChecked(originalControl);});if(checked) declarationNote+='已勾选原创声明；';}
-  const declarationEntry=findDeclarationText(document,['添加内容类型声明','添加创作声明','内容类型声明']);
-  if(declarationEntry){
-    progress('正在设置小红书 AI 生成声明','declaration');
-    try{
-      context.edit(()=>declarationEntry.click());
-      const option=await waitFor(()=>findDeclarationText(document,['含AI生成内容','含 AI 生成内容','内容由AI生成','内容由 AI 生成','AI生成内容','AI 生成']),signal,10000,false,'等待小红书 AI 生成声明');
-      if(option)context.edit(()=>option.click());
-      if(option)declarationNote+='已选择 AI 生成声明；';
-    }catch{declarationNote+='AI 生成声明未确认，请手动检查；';}
+  const originalLabels=['原创声明','声明原创','原创视频'];
+  // The agreement's confirm button is also named 声明原创. Prefer the
+  // setting's own labels so an already-open dialog cannot make it ambiguous.
+  const readOriginal=()=>findDeclarationControl(document,['原创声明','原创视频'])??findDeclarationControl(document,['声明原创']);
+  const originalDialog=()=>[...document.querySelectorAll<HTMLElement>('.originalContainer')].find(declarationVisible);
+  const originalControl=readOriginal();
+  if(originalControl && (checkedState(originalControl)===true || !declarationDisabled(originalControl))){
+    progress('正在设置小红书原创声明','declaration');
+    if(checkedState(originalControl)!==true || originalDialog()){
+      if(!originalDialog())context.edit(()=>ensureChecked(originalControl));
+      // First-time declarations open an agreement rather than immediately
+      // persisting the switch. Only confirm inside this specific dialog.
+      await waitFor(()=>checkedState(readOriginal()??originalControl)===true||originalDialog(),signal,10000,true,'等待小红书原创声明确认');
+      const dialog=originalDialog();
+      if(dialog){
+        const agreement=dialog.querySelector<HTMLElement>('#originalCheckBox')
+          ?? findDeclarationText(dialog,['《原创声明须知》','原创声明须知'])?.closest<HTMLElement>('.d-checkbox-main-label');
+        if(!agreement)throw new Error('小红书原创声明须知勾选框未找到，请手动检查');
+        const checkbox=agreement.querySelector<HTMLElement>('input[type="checkbox"],[role="checkbox"]')??agreement;
+        if(checkedState(checkbox)!==true){
+          // Delight handles clicks on the label and keeps the checked state in its native input.
+          const target=agreement.matches('.d-checkbox-main-label')?agreement:checkbox;
+          context.edit(()=>ensureChecked(target));
+        }
+        const confirm=await waitFor(()=>{
+          const text=findDeclarationText(dialog,['声明原创']);
+          const button=text?.closest<HTMLElement>('button,[role="button"]')??text;
+          return button&&!button.matches(':disabled,[aria-disabled="true"],.disabled,.is-disabled')?button:undefined;
+        },signal,10000,true,'等待小红书原创声明确认按钮');
+        context.edit(()=>confirm.click());
+        await waitFor(()=>!originalDialog(),signal,10000,true,'核验小红书原创声明弹窗关闭');
+      }
+    }
+    await waitFor(()=>checkedState(readOriginal()??originalControl)===true,signal,10000,true,'核验小红书原创声明');
+    declarationNote+='已勾选原创声明；';
+  }else if(findDeclarationText(document,originalLabels)){
+    declarationNote+='原创声明未确认，请手动检查；';
   }
+  progress('正在设置小红书 AI 生成声明','declaration');
+  declarationNote+=await selectAiDeclaration(['添加内容类型声明','添加创作声明','内容类型声明'],['笔记含AI合成内容','含AI生成内容','内容由AI生成','AI生成内容','AI生成'],context.edit,
+    (read,label,deferred)=>waitFor(read,signal,10000,deferred,label));
   let collectionNote = '';
   if (publication.collection) collectionNote = await selectXiaohongshuCollection(publication.collection, context);
   let scheduleNote = '';
@@ -261,10 +345,25 @@ export async function fillXiaohongshu(publication: Publication, cover: Asset | u
     if (!(cover.blob instanceof Blob) || !cover.type.startsWith('image/')) throw new Error('封面素材不可用，请手动设置');
     const signature = () => index === 0 ? previewSignature() : pkCards()[index-1]?.querySelector<HTMLImageElement>('.pk-cover-list-card-img')?.src ?? '';
     const before = signature();
+    const proofKey = `${index}:${cover.id}`;
+    const ownedCover = !!before && coverProofs[proofKey] === before;
+    let ratioMatches = true;
+    if (ownedCover && index > 0) {
+      const image = pkCards()[index-1]?.querySelector<HTMLImageElement>('.pk-cover-list-card-img');
+      const bitmap = await createImageBitmap(cover.blob);
+      ratioMatches = !!image?.naturalWidth && Math.abs(image.naturalWidth / image.naturalHeight - bitmap.width / bitmap.height) < 0.01;
+      bitmap.close();
+    }
+    if (ownedCover && ratioMatches) {
+      progress(coverStage + '：已核验保存结果，跳过重复上传', 'cover-' + index + '-confirm');
+      coverResult = `${index+1} 张封面已核验保存`;
+      continue;
+    }
     if (index === 0) {
       const entry = document.querySelector<HTMLElement>(`${coverSelector} .cover-edit-entry`);
       if (!entry || document.querySelectorAll(`${coverSelector} .cover-edit-entry`).length !== 1) throw new Error('未找到唯一封面编辑入口，请手动设置');
-      entry.click();
+      const existingModal = one<HTMLElement>('.cover-modal');
+      if (!existingModal && !legacyCoverModal()) context.edit(() => entry.click());
     } else {
       // The PK panel is mounted asynchronously after the main cover editor closes.
       // Wait for the exact next slot or the enabled add control before deciding it is missing.
@@ -280,22 +379,100 @@ export async function fillXiaohongshu(publication: Publication, cover: Asset | u
       if (target.kind === 'card') {
         const card = target.element;
         const entry = card.querySelector<HTMLElement>('.pk-cover-list-edit-text');
-        if (!entry?.getAttribute('data-impression')?.includes('系统推荐')) throw new Error('已有自定义 PK 封面，未覆盖，请手动检查');
+        if (!entry) throw new Error('未找到 PK 封面编辑入口');
+        if (!ownedCover && !entry.getAttribute('data-impression')?.includes('系统推荐')) throw new Error('已有自定义 PK 封面，未覆盖，请手动检查');
         entry.click();
       } else {
         // Open the editor from the PK area first. The main cover editor is a fixed 4:3 slot.
         guard(signal); target.element.click();
       }
     }
-    const modal = await waitFor(() => {
+    let modal = await waitFor(() => {
       const selectors = index === 0 ? ['.cover-modal'] : ['.pk-cover-list-editor-modal', '.cover-modal'];
       for (const selector of selectors) {
         const candidate = one<HTMLElement>(selector);
-        if (candidate?.querySelector('input[type="file"][aria-label="上传封面图片"]') && candidate.querySelector('.editor-panel')) return candidate;
+        if (candidate && (candidate.querySelector('.editor-panel') || /视频加载遇到问题|回退到旧版封面编辑弹窗/.test(candidate.innerText))) return candidate;
       }
-      return undefined;
+      return legacyCoverModal();
     }, signal, 60000, false, coverStage + '：打开编辑器', visible => progress(coverStage + (visible ? '：打开编辑器（仅前台计时）' : '：页面在后台，切回小红书继续；计时已暂停'), 'cover-' + index + '-open'));
     if (!modal.innerText.includes('设置封面')) throw new Error('封面弹窗不匹配，已停止');
+    // The current editor opens on its preview tab. Switch to the scoped edit
+    // tab before looking for the image input; otherwise the hidden preview
+    // video reports a misleading "video loading" message and no file input
+    // is mounted.
+    const editTab = [...modal.querySelectorAll<HTMLButtonElement>('.video-panel-switch-item')]
+      .find(button => button.textContent?.trim() === '编辑');
+    if (editTab && !editTab.classList.contains('active')) {
+      guard(signal);
+      context.edit(() => editTab.click());
+      await waitFor(() => editTab.classList.contains('active'), signal, 10000, false, coverStage + '：切换编辑页签');
+    }
+    if (modal.matches('.cover-modal,.pk-cover-list-editor-modal')) {
+      await waitFor(() => modal.querySelector('input[type="file"][aria-label="上传封面图片"]') || /视频加载遇到问题|回退到旧版封面编辑弹窗/.test(modal.innerText), signal, 15000, false, coverStage + '：等待新版编辑器');
+      if (!modal.querySelector('input[type="file"][aria-label="上传封面图片"]')) {
+        const fallback = [...modal.querySelectorAll<HTMLElement>('button,a,[role="button"]')].filter(visible).filter(e=>/^(回退到旧版|使用旧版|切换旧版)/.test(compactText(e.textContent ?? '')));
+        if (fallback.length !== 1) throw new Error('新版封面不可用且未找到唯一旧版入口，请检查');
+        progress(coverStage + '：新版不可用，回退旧版', 'cover-' + index + '-open');
+        deferClick(context, fallback[0]!);
+        modal = await waitFor(legacyCoverModal,signal,15000,false,'等待旧版封面编辑器');
+      }
+    }
+    const legacyConfirm = !modal.matches('.cover-modal,.pk-cover-list-editor-modal') ? modal.querySelector<HTMLButtonElement>('.btn-confirm') : undefined;
+    if (legacyConfirm) {
+      // The legacy editor keeps its existing local cover list in the modal and
+      // only mounts a file input after switching to “上传封面”. An existing
+      // list alone is not proof that this run uploaded the requested asset;
+      // fail closed until a new image is observed.
+      let input = modal.querySelector<HTMLInputElement>('input[type="file"]');
+      const existingImages = () => [...modal.querySelectorAll<HTMLImageElement>('img')]
+        .filter(image => {
+          const source = image.currentSrc || image.src;
+          // The legacy editor uses three ordinary crop/preview <img> nodes
+          // with a reused blob URL. They do not carry data-index; only count
+          // loaded bitmap previews and exclude the empty SVG placeholder.
+          return visible(image) && image.complete && image.naturalWidth &&
+            /^(blob:|data:image\/(?!svg\+xml))/.test(source);
+        });
+      if (!input) {
+        const uploadTab = [...modal.querySelectorAll<HTMLElement>('button,[role="tab"],[role="button"],span,div')]
+          .find(element => visible(element) && compactText(element.textContent ?? '') === '上传封面');
+        if (uploadTab) {
+          guard(signal); deferClick(context, uploadTab);
+          input = await waitFor(() => modal.querySelector<HTMLInputElement>('input[type="file"]'), signal, 10000, false, coverStage + '：打开旧版上传封面');
+        }
+      }
+      if (input) {
+        const previousImages = new Set(existingImages().map(image => image.currentSrc || image.src));
+        const confirmWasEnabled = !legacyConfirm.disabled;
+        const transfer = new DataTransfer(); transfer.items.add(new File([cover.blob], cover.name, {type:cover.type,lastModified:cover.lastModified}));
+        input.files = transfer.files;
+        input.dispatchEvent(new Event('input', {bubbles:true}));
+        input.dispatchEvent(new Event('change', {bubbles:true}));
+        await waitFor(() => {
+          if (/上传失败|格式不支持|上传出错/.test(modal.innerText)) return true;
+          const newImage = existingImages().some(image => !previousImages.has(image.currentSrc || image.src));
+          // The platform may reuse the same blob URL and clear the native
+          // FileList after consuming it. An enabled confirm button plus a
+          // loaded crop preview is the positive completion signal in that DOM.
+          const consumed = !input!.files?.length && !confirmWasEnabled && !legacyConfirm.disabled && existingImages().length > 0;
+          return newImage || consumed;
+        }, signal, 120000, false, coverStage + '：等待旧版封面上传');
+        if (/上传失败|格式不支持|上传出错/.test(modal.innerText)) throw new Error('封面上传失败，请手动处理');
+      }
+      if (!input) {
+        throw new Error('第 ' + (index + 1) + ' 张封面处理未完成：旧版封面弹窗没有可用上传入口，需人工检查');
+      }
+      const matches = await Promise.all(existingImages().map(image=>imageMatchesAsset(image,cover,signal)));
+      if (!matches.some(Boolean)) throw new Error('旧版封面预览与所选图片不一致，未保存');
+      await waitFor(()=>!legacyConfirm.disabled && existingImages().length>0,signal,15000,false,'等待旧版封面确认');
+      await selectCoverRatio(modal,cover,context);
+      progress(coverStage + '：原图校验通过，确认保存', 'cover-' + index + '-confirm');
+      guard(signal); deferClick(context, legacyConfirm);
+      await waitFor(() => (!modal.isConnected || !visible(modal)) && signature() !== before && !!signature() && !/封面上传中/.test(document.querySelector(coverSelector)?.textContent ?? ''), signal,90000,false,coverStage + '：核验旧版保存结果');
+      coverProofs[proofKey] = signature();
+      coverResult = `${index+1} 张封面已核验保存（请检查裁剪）`;
+      continue;
+    }
     const inputs = modal.querySelectorAll<HTMLInputElement>('input[type="file"][aria-label="上传封面图片"]');
     if (inputs.length !== 1 || inputs[0]!.disabled || inputs[0]!.files?.length) throw new Error('封面入口存在歧义或已有素材，请手动设置');
     const panels = modal.querySelectorAll<HTMLElement>('.editor-panel');
@@ -359,9 +536,11 @@ export async function fillXiaohongshu(publication: Publication, cover: Asset | u
       if (buttons.length !== 1) throw new Error('无法确认封面完成按钮，请手动处理');
       return buttons[0]!.disabled ? undefined : buttons[0];
     }, signal, 120000, false, coverStage + '：上传与原图校验', visible => progress(coverStage + (visible ? '：上传与原图校验（仅前台计时）' : '：页面在后台，切回小红书继续；计时已暂停'), 'cover-' + index + '-upload'));
+    await selectCoverRatio(modal,cover,context);
     progress(coverStage + '：确认保存结果（最多等待 90 秒）', 'cover-' + index + '-confirm');
-    guard(signal); button.click();
+    guard(signal); deferClick(context, button);
     await waitFor(() => (!modal.isConnected || !visible(modal)) && signature() !== before && !!signature(), signal, 90000, false, coverStage + '：确认保存结果', visible => progress(coverStage + (visible ? '：确认保存结果（仅前台计时）' : '：页面在后台，切回小红书继续；计时已暂停'), 'cover-' + index + '-confirm'));
+    coverProofs[proofKey] = signature();
     coverResult = `${index+1} 张封面预览已更新（请检查裁剪）`;
   }
   guard(signal); verifyCopy();

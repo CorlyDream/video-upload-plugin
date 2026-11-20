@@ -1,7 +1,7 @@
 import {kuaishouDescription, type Publication} from '../core/publication';
 import type {Asset} from '../core/model';
 import {waitFor, type FillContext} from './xiaohongshu';
-import {declarationVisible, ensureChecked, findDeclarationControl, findDeclarationText} from './declarations';
+import {checkedState, declarationDisabled, ensureChecked, findDeclarationControl, selectAiDeclaration} from './declarations';
 
 const rootSelector = '[class^="_high-cover-editor_"]';
 const visible = (e:Element) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
@@ -64,31 +64,40 @@ export async function fillKuaishou(publication:Publication, cover:Asset|undefine
     return editor&&covers?{editor,covers}:undefined;
   },'upload','等待快手视频上传与处理',600000);
   guard(signal);
-  if(fields.editor.textContent?.trim())throw new Error('快手编辑页已有文案，未覆盖，请手动检查');
-  progress('正在填写作品描述：标题和前 4 个标签','copy');
   const copy=kuaishouDescription(publication);
-  if(copy){
-    fields.editor.focus();
-    context.edit(()=>{if(!document.execCommand('insertText',false,copy))throw new Error('快手作品描述不接受自动输入，请手动检查');});
-    fields.editor.dispatchEvent(new Event('input',{bubbles:true}));
-  }
+  const existingCopy=fields.editor.innerText.replace(/\r\n/g,'\n').replace(/\n+$/,'');
+  const copyAlreadyMatches=existingCopy===copy;
+  if(existingCopy&&!copyAlreadyMatches)throw new Error('快手编辑页已有不同文案，未覆盖，请手动检查');
+  if(!copyAlreadyMatches){
+    progress('正在填写作品描述：标题和前 4 个标签','copy');
+    if(copy){
+      fields.editor.focus();
+      context.edit(()=>{if(!document.execCommand('insertText',false,copy))throw new Error('快手作品描述不接受自动输入，请手动检查');});
+      fields.editor.dispatchEvent(new Event('input',{bubbles:true}));
+    }
+  } else progress('快手作品描述已存在且回读一致，继续后续步骤','copy');
   const verifyCopy=()=>{
     if(!fields.editor.isConnected||fields.editor.innerText.replace(/\r\n/g,'\n').replace(/\n+$/,'')!==copy)throw new Error('快手作品描述回读不一致，已停止，不会重复填写');
     return true;
   };
   await wait(verifyCopy,'copy','核验快手作品描述',30000,true);
   let declarationNote='';
-  const originalControl=findDeclarationControl(document,['声明原创','原创视频']);
-  if(originalControl){let checked=false;context.edit(()=>{checked=ensureChecked(originalControl);});if(checked) declarationNote+='已勾选原创声明；';}
-  const declarationEntry=findDeclarationText(document,['选择视频标注','选择内容标注','添加内容声明','作品声明']);
-  if(declarationEntry){
-    progress('正在设置快手 AI 生成声明','declaration');
-    try{
-      context.edit(()=>declarationEntry.click());
-      const option=await wait(()=>findDeclarationText(document,['含AI生成内容','含 AI 生成内容','内容由AI生成','内容由 AI 生成','AI生成','AI 生成']),'declaration','等待快手 AI 生成声明',10000);
-      if(option)context.edit(()=>option.click());
-      if(option)declarationNote+='已选择 AI 生成声明；';
-    }catch{declarationNote+='AI 生成声明未确认，请手动检查；';}
+  const originalLabels=['原创声明','声明原创','原创视频'];
+  const originalControl=findDeclarationControl(document,originalLabels);
+  if(originalControl && !declarationDisabled(originalControl)){
+    context.edit(()=>ensureChecked(originalControl));
+    await wait(()=>checkedState(findDeclarationControl(document,originalLabels)??originalControl)===true,'declaration','核验快手原创声明',10000,true);
+    declarationNote+='已勾选原创声明；';
+  }else if(originalControl){
+    declarationNote+=checkedState(originalControl)===true?'已勾选原创声明；':'原创声明未确认，请手动检查；';
+  }
+  progress('正在设置快手 AI 生成声明','declaration');
+  try{
+    declarationNote+=await selectAiDeclaration(['作者声明','选择视频标注','选择内容标注','添加内容声明','作品声明'],['内容为AI生成','含AI生成内容','内容由AI生成','AI生成'],context.edit,
+      (read,label,deferred)=>wait(read,'declaration',label,10000,deferred));
+  }catch{
+    guard(signal);
+    declarationNote+='AI 生成声明未确认，请手动检查；';
   }
   let scheduleNote='';
   if(publication.scheduleAt) scheduleNote=await setKuaishouSchedule(publication.scheduleAt,wait,context);
