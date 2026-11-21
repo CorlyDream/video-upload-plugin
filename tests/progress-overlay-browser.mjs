@@ -83,4 +83,74 @@ try {
     console.log('PROGRESS', scenario.status, scenario.stage, 'PASS');
     await page.close();
   }
+  for (const mode of ['page-script', 'manual-text', 'manual-control']) {
+    const page = await browser.newPage();
+    const editor = `
+      <div>重新上传</div>
+      <input id="title" placeholder="填写短标题有机会获得更多流量">
+      <div contenteditable data-placeholder="添加描述" ${mode === 'page-script' ? '' : 'hidden'}></div>
+      <label><input id="checkbox" type="checkbox">声明</label>
+    `;
+    await page.route('https://channels.weixin.qq.com/**', route => route.fulfill({
+      contentType:'text/html; charset=utf-8',
+      body:mode === 'manual-text' ? `<iframe srcdoc='${editor}'></iframe>` : editor,
+    }));
+    await page.goto('https://channels.weixin.qq.com/platform/post/create');
+    await page.evaluate(mode => {
+      window.checkpoints = [];
+      window.chrome = {runtime:{
+        getURL:path => new URL(path, location.origin).href,
+        onConnect:{addListener:listener => window.connect = listener, removeListener:() => {}},
+      }};
+      if (mode === 'page-script') {
+        const checkbox = document.querySelector('#checkbox');
+        checkbox.addEventListener('input', event => { window.pageInputWasTrusted = event.isTrusted; });
+        document.querySelector('#title').addEventListener('input', event => {
+          const title = event.target;
+          const value = title.value;
+          title.value = '';
+          setTimeout(() => {
+            checkbox.click();
+            title.value = value;
+          }, 0);
+        }, {once:true});
+      }
+    }, mode);
+    await page.addScriptTag({content:code});
+    await page.evaluate(() => {
+      let receive;
+      window.connect({name:'upload-page', onMessage:{addListener:listener => receive = listener}, onDisconnect:{addListener:() => {}}, postMessage:message => {
+        if (message.type === 'checkpoint') window.checkpoints.push(message.checkpoint);
+        if (message.type === 'approve') receive({type:'approved', claimId:message.claimId});
+      }});
+      receive({type:'run', origin:location.origin, token:'fixture', task:{
+        taskId:'task', attemptId:'attempt', platform:'weixin', status:'transferring', step:0,
+        videoAlreadyTransferred:true, publication:{title:'小熊洗脸', description:'描述', tags:[]},
+      }});
+      const bridge = document.querySelector('iframe[src*="bridge.html"]');
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => channel.port1.postMessage({blob:new Blob(['fixture']), name:'fixture.mp4'});
+      window.dispatchEvent(new MessageEvent('message', {
+        source:bridge.contentWindow, origin:location.origin, ports:[channel.port2],
+        data:{type:'bridge-ready', token:'fixture', claimId:'claim'},
+      }));
+    });
+    await page.waitForFunction(() => window.checkpoints.at(-1)?.pipelineStage === 'copy');
+    if (mode === 'manual-text') await page.frameLocator('iframe[srcdoc]').locator('#title').fill('人工填写');
+    if (mode === 'manual-control') await page.locator('#checkbox').click();
+    await page.waitForFunction(() => {
+      const checkpoint = window.checkpoints.at(-1);
+      return checkpoint?.status === 'aborted' || checkpoint?.pipelineStage === 'review';
+    }, null, {timeout:4000});
+    const result = await page.evaluate(() => ({checkpoint:window.checkpoints.at(-1), pageInputWasTrusted:window.pageInputWasTrusted}));
+    if (mode === 'page-script') {
+      assert.equal(result.pageInputWasTrusted, true, 'fixture must generate trusted input without a user gesture');
+      assert.equal(result.checkpoint.pipelineStage, 'review', result.checkpoint.reason);
+    } else {
+      assert.equal(result.checkpoint.status, 'aborted');
+      assert.equal(result.checkpoint.pipelineStage, 'copy');
+    }
+    console.log('WEIXIN TAKEOVER', mode, 'PASS');
+    await page.close();
+  }
 } finally { await browser.close(); }

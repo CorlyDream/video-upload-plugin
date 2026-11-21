@@ -123,7 +123,11 @@ function coverModal(documentRoot: Document, ratio: CoverRatio): HTMLElement | un
 }
 
 export type WeixinCoverAction = 'open' | 'direct' | 'upload' | 'confirm';
-interface WeixinFillContext extends FillContext { activateCover?: (ratio: CoverRatio, action: WeixinCoverAction, asset?: Asset) => Promise<boolean> | boolean; activateOriginal?: () => Promise<boolean> | boolean }
+interface WeixinFillContext extends FillContext {
+  watchEditor?: (document: Document) => void;
+  activateCover?: (ratio: CoverRatio, action: WeixinCoverAction, asset?: Asset) => Promise<boolean> | boolean;
+  activateOriginal?: () => Promise<boolean> | boolean;
+}
 
 function weixinDescription(value: Publication): string {
   const body = publicationBody(value);
@@ -357,8 +361,10 @@ export async function fillWeixin(documentRoot: Document, publication: Publicatio
   if (!uploadReady) throw new Error('视频号视频处理未完成');
   progress('视频号视频已上传；封面操作前仍需等待平台解析并生成默认封面', 'upload');
   const title = await wait<HTMLInputElement>(() => find<HTMLInputElement>('input[placeholder="填写短标题有机会获得更多流量"]'), '等待视频号编辑页');
+  ctx.watchEditor?.(title.ownerDocument);
   progress('已找到视频号短标题输入框', 'copy');
   const description = await wait<HTMLElement>(() => find<HTMLElement>('[contenteditable][data-placeholder="添加描述"]'), '等待视频号描述框');
+  ctx.watchEditor?.(description.ownerDocument);
   progress('已找到视频号描述框', 'copy');
   const roots=weixinSearchRoots(documentRoot);
   let declarationNote='';

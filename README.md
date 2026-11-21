@@ -19,13 +19,13 @@ npm run build
 
 ## 从 ShotBase 导入
 
-使用 Chrome 148 或更新版本。默认构建接收来自 `http://localhost` 和 `http://127.0.0.1` 的页面请求。若通过局域网地址打开 ShotBase，构建时加入该地址，然后在 `chrome://extensions` 重新加载插件。
+使用 Chrome 148 或更新版本。直接运行 `npm run build` 即可连接 `http://localhost`、`http://127.0.0.1` 和 `http://192.168.2.4:5001` 上的 ShotBase。已有安装在构建后到 `chrome://extensions` 重新加载插件。
 
 ```sh
-VIDEO_UPLOAD_IMPORT_ORIGINS=http://192.168.2.4:5001 npm run build
+VIDEO_UPLOAD_IMPORT_ORIGINS=http://192.168.2.10:5001 npm run build
 ```
 
-`VIDEO_UPLOAD_IMPORT_ORIGINS` 接受逗号分隔的 HTTP/HTTPS 来源，Chrome 按协议和主机匹配网页。在 ShotBase「一键发布」里的「插件连接设置」填写一次插件 ID，浏览器会自动记住。
+通过其他地址访问 ShotBase 时，可用上面的方式追加来源。`VIDEO_UPLOAD_IMPORT_ORIGINS` 接受逗号分隔的 HTTP/HTTPS 来源，追加的来源按协议和主机匹配网页。在 ShotBase「一键发布」里的「插件连接设置」填写一次插件 ID，浏览器会自动记住。
 
 网页可用 `chrome.runtime.sendMessage(extensionId, message)` 发送 `video-upload.import.v1`。字段包括 `type`、32 位小写十六进制 `requestId`、`video` 文件、`title`，以及可选的 `candidateTitles`、`tags` 字符串数组和 `collection` 合集名称。封面可使用单个 `cover` 文件，或按主封面、PK 候选顺序传入 `covers` 文件数组。收到 `{ok: true, imported: true}` 表示工作台已保存素材。可先用 `video-upload.import-check.v1` 和相同的 `requestId` 检查是否可导入。空工作台返回 `supportsAllCovers: true` 时可以传入全部封面，`maxCovers` 用于兼容旧发送端。同时返回 `supportsTags` 和 `supportsCollection`。同一来源与请求 ID 可安全重试，其他新批次需等工作台清空。
 

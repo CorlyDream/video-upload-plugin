@@ -1,7 +1,11 @@
 import { build } from 'vite';
 import { mkdir, writeFile } from 'node:fs/promises';
 const origins = ['https://creator.xiaohongshu.com/*','https://creator.douyin.com/*','https://member.bilibili.com/*','https://channels.weixin.qq.com/*','https://cp.kuaishou.com/*'];
-const importMatches = ['http://localhost/*', 'http://127.0.0.1/*'];
+const importMatches = [
+  'http://localhost/*',
+  'http://127.0.0.1/*',
+  'http://192.168.2.4:5001/*',
+];
 for (const source of (process.env.VIDEO_UPLOAD_IMPORT_ORIGINS ?? '').split(',').map(value => value.trim()).filter(Boolean)) {
   const url = new URL(source);
   if (!['http:', 'https:'].includes(url.protocol) || url.pathname !== '/' || url.search || url.hash || url.username || url.password || url.hostname.includes('*')) {

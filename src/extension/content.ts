@@ -11,6 +11,15 @@ import { fillKuaishou } from './kuaishou';
 import { clickWeixinOriginalConfirm, fillWeixin, openWeixinUploadEntry, weixinSearchRoots } from './weixin';
 import { fillBilibili, resolveBilibiliTransferInput, selectBilibiliUploadInput } from './bilibili';
 
+const nativeEditControls = 'select,input:is([type="checkbox"],[type="radio"],[type="file"],[type="range"],[type="color"],[type="date"],[type="datetime-local"],[type="month"],[type="time"],[type="week"])';
+const clickControls = `button,a,[role="button"],input[type="submit"],${nativeEditControls}`;
+
+function matchesControl(event: Event, selector: string): boolean {
+  // The composer may be in a same-origin iframe with a different Element constructor.
+  const target = event.composedPath()[0] as Element | undefined;
+  return target?.nodeType === Node.ELEMENT_NODE && !!target.closest(selector);
+}
+
 // Re-injection must never attach a second executor to the same document.
 const scope = globalThis as typeof globalThis & { __videoUploadM0?: boolean };
 if (!scope.__videoUploadM0) {
@@ -21,6 +30,7 @@ if (!scope.__videoUploadM0) {
     let stopped = false;
     const stopHeartbeat = keepConnectionAlive(() => port.postMessage({type:'heartbeat'}));
     const cancellation = new AbortController();
+    const watchedDocuments = new WeakSet<Document>();
     let ownSynchronousEdit = false;
     let iframe: HTMLIFrameElement | undefined;
     let channel: MessagePort | undefined;
@@ -114,9 +124,6 @@ if (!scope.__videoUploadM0) {
       iframe?.remove(); iframe = undefined;
       channel?.close(); channel = undefined;
       window.removeEventListener('message', onBridge);
-      document.removeEventListener('input', edited, true);
-      document.removeEventListener('change', edited, true);
-      document.removeEventListener('click', clicked, true);
       window.removeEventListener('pagehide', leaving);
       chrome.runtime.onConnect.removeListener(onConnect);
       scope.__videoUploadM0 = false;
@@ -128,9 +135,25 @@ if (!scope.__videoUploadM0) {
       try { port.postMessage({ type: 'checkpoint', checkpoint: task }); } catch { clean(); }
     };
     const abort = (reason: string) => { report('aborted', reason); clean(); };
+    // Native input/change events can be trusted even when a page script caused them.
     const edited = (event: Event) => { if (event.isTrusted && !ownSynchronousEdit) abort('检测到你在平台页面编辑，已停止操作'); };
+    const takeOverControl = () => abort('检测到你操作平台控件，已交由你接管');
     const clicked = (event: Event) => {
-      if (event.isTrusted && event.target instanceof Element && event.target.closest('button,a,[role="button"],input[type="submit"]')) abort('检测到你操作平台控件，已交由你接管');
+      if (event.isTrusted && matchesControl(event, clickControls)) takeOverControl();
+    };
+    const watchEdits = (editor: Document) => {
+      if (watchedDocuments.has(editor)) return;
+      watchedDocuments.add(editor);
+      const options = {capture:true, signal:cancellation.signal};
+      editor.addEventListener('beforeinput', edited, options);
+      editor.addEventListener('click', clicked, options);
+      editor.addEventListener('pointerdown', event => {
+        if (event.isTrusted && event.button === 0 && matchesControl(event, nativeEditControls)) takeOverControl();
+      }, options);
+      editor.addEventListener('keydown', event => {
+        if (!event.isTrusted || !matchesControl(event, nativeEditControls)) return;
+        if (event.key.length === 1 || /^(Arrow(Up|Down|Left|Right)|Enter|Home|End|PageUp|PageDown|Backspace|Delete)$/.test(event.key)) takeOverControl();
+      }, options);
     };
     const leaving = () => { report('paused', '平台页面离开，已停止操作'); clean(); };
     const navigating = (event?: Event) => {
@@ -226,6 +249,7 @@ if (!scope.__videoUploadM0) {
             if ((task.pkCoverAssetIds ?? []).length !== (asset.pkCovers ?? []).length || (task.pkCoverAssetIds ?? []).some((id,index)=>asset.pkCovers[index]?.id !== id || asset.pkCovers[index]?.batchId !== task!.batchId)) throw new Error('PK 封面身份不匹配');
             reason = await fillWeixin(document, normalizePublication(task.publication, false), {
               signal:cancellation.signal, progress:(reason,stage)=>report('transferring', reason, stage),
+              watchEditor:watchEdits,
               edit(action) { ownSynchronousEdit = true; try { action(); } finally { ownSynchronousEdit = false; } },
               activateCover: async (ratio,action,coverAsset) => {
                 if (stopped || !task) return false;
@@ -287,9 +311,7 @@ if (!scope.__videoUploadM0) {
       token = message.token; origin = message.origin; initialUrl = location.href;
       updateProgress(task.status, task.reason, task.pipelineStage);
       if (location.origin !== origin) { report('needs_attention', '当前页面不属于目标平台'); clean(); return; }
-      document.addEventListener('input', edited, true);
-      document.addEventListener('change', edited, true);
-      document.addEventListener('click', clicked, true);
+      watchEdits(document);
       window.addEventListener('pagehide', leaving);
       navigation?.addEventListener('navigate', navigating);
       window.addEventListener('popstate', navigating);
@@ -307,6 +329,7 @@ if (!scope.__videoUploadM0) {
         if (!task?.videoAlreadyTransferred && inputs.length > 1) { report('needs_attention', '发现多个视频入口，无法确认目标，已停止'); clean(); return; }
         if (!task?.videoAlreadyTransferred && !inputs.length) return;
         input = inputs[0];
+        if (input && task?.platform === 'weixin') watchEdits(input.ownerDocument);
         observer?.disconnect();
         clearInterval(inspectTimer);
         report('transferring', task?.videoAlreadyTransferred ? '正在接续原平台编辑页；不会重复上传' : '正在交接素材；不代表上传完成', task?.videoAlreadyTransferred ? 'upload' : 'transfer');
