@@ -1,3 +1,4 @@
+import {scheduleOption, selectScheduleMonth} from './schedule-picker';
 import type {Publication} from '../core/publication';
 import type {Asset, BilibiliRejectedTag} from '../core/model';
 import type {FillContext} from './xiaohongshu';
@@ -80,35 +81,51 @@ export function selectBilibiliUploadInput(inputs: HTMLInputElement[]): HTMLInput
   return cardInputs;
 }
 
-function exactVisibleText(root: ParentNode, value: string): HTMLElement | undefined {
-  return [...root.querySelectorAll<HTMLElement>('button,[role="button"],li,td,span,p,div')]
-    .filter(visible).filter(element => element.textContent?.trim() === value)
-    .sort((a,b)=>a.children.length-b.children.length)[0];
-}
 async function setBilibiliSchedule(documentRoot: Document, scheduleAt: string, wait: BilibiliWait, ctx: FillContext): Promise<string> {
-  const [date,time]=scheduleAt.split('T');
-  if(!date||!time)throw new Error('定时发布时间格式无效，请重新选择时间');
-  const switchControl=documentRoot.querySelector<HTMLElement>('.time-container .switch-container');
-  if(!switchControl || !visible(switchControl))return 'B 站编辑页没有定时控件，已跳过定时设置；';
-  ctx.progress('正在设置 B 站定时发布时间','schedule');
-  if(!switchControl.classList.contains('switch-container-active')){ctx.edit(()=>switchControl.click());await wait(()=>switchControl.classList.contains('switch-container-active'),'核验 B 站定时发布开关',10000);}
-  const picker=await wait(()=>documentRoot.querySelector<HTMLElement>('.time-picker') ?? undefined, '等待 B 站定时控件',10000);
-  const dateControl=picker.querySelector<HTMLElement>('.date-picker-date');
-  const timeControl=picker.querySelector<HTMLElement>('.date-picker-timer');
-  if(!dateControl||!timeControl)return 'B 站定时控件不完整，已跳过定时设置，请手动检查；';
-  ctx.edit(()=>dateControl.click());
-  const day=await wait(()=>exactVisibleText(documentRoot,date), '等待 B 站定时日期',10000);
-  ctx.edit(()=>day.click());
-  ctx.edit(()=>timeControl.click());
-  const hour=time.slice(0,2), minute=time.slice(3,5);
-  const hourItem=await wait(()=>exactVisibleText(documentRoot,hour), '等待 B 站定时时',10000);
-  ctx.edit(()=>hourItem.click());
-  const minuteItem=await wait(()=>exactVisibleText(documentRoot,minute), '等待 B 站定时分钟',10000);
-  ctx.edit(()=>minuteItem.click());
-  const confirm=exactVisibleText(documentRoot,'确定');
-  if(confirm)ctx.edit(()=>confirm.click());
-  await wait(()=>picker.querySelector('.date-picker-date .date-show')?.textContent?.trim()===date && picker.querySelector('.date-picker-timer .date-show')?.textContent?.trim()===time,'核验 B 站定时发布时间',10000);
-  return `已设置并回读 B 站定时发布时间 ${scheduleAt.replace('T',' ')}；`;
+  const [date, time] = scheduleAt.split('T');
+  if (!date || !time) throw new Error('定时发布时间格式无效，请重新选择时间');
+  const [hour, minute] = time.split(':');
+  if (!hour || !minute) throw new Error('定时发布时间格式无效，请重新选择时间');
+  ctx.progress('正在设置 B 站定时发布时间', 'schedule');
+  if (Number(minute) % 5 !== 0) throw new Error(`B 站定时发布只支持 5 分钟档位，无法设置 ${time}。请在 B 站编辑页手动选择时间。`);
+  const switchControl = documentRoot.querySelector<HTMLElement>('.time-container .switch-container');
+  if (!switchControl || !visible(switchControl)) return 'B 站编辑页没有定时控件，已跳过定时设置；';
+  const enabled = () => switchControl.classList.contains('switch-container-active');
+  if (!enabled()) {
+    ctx.edit(() => switchControl.click());
+    await wait(enabled, '核验 B 站定时发布开关', 10000);
+  }
+  const picker = await wait(() => documentRoot.querySelector<HTMLElement>('.time-container .time-picker') ?? undefined, '等待 B 站定时控件', 10000);
+  const dateControl = picker.querySelector<HTMLElement>('.date-picker-date');
+  const timeControl = picker.querySelector<HTMLElement>('.date-picker-timer');
+  if (!dateControl || !timeControl) throw new Error('B 站定时控件不完整，请手动检查');
+  const readDate = () => dateControl.querySelector('.date-show')?.textContent?.trim();
+  const readTime = () => timeControl.querySelector('.date-show')?.textContent?.trim();
+  if (readDate() !== date) {
+    ctx.edit(() => dateControl.click());
+    await selectScheduleMonth(date, () => picker.querySelector('.date-picker-nav-title')?.textContent ?? '', direction => {
+      const arrow = picker.querySelector(direction === 'next' ? '.next-btn-month' : '.prev-btn-month');
+      if (!arrow || arrow.classList.contains('date-select-disabled')) throw new Error('B 站定时日历无法切换月份，请手动检查');
+      ctx.edit(() => arrow.dispatchEvent(new MouseEvent('click', {bubbles: true})));
+    }, (read, label) => wait(read, label, 10000), 'B 站');
+    const day = await wait(() => scheduleOption(picker, '.date-wrp .date-picker-body-item:not(.date-item-disabled), .date-wrp .date-item', String(Number(date.slice(-2)))), '等待 B 站定时日期', 10000);
+    ctx.edit(() => day.click());
+    await wait(() => readDate() === date, '核验 B 站定时日期', 10000);
+  }
+  if (readTime() !== time) {
+    ctx.edit(() => timeControl.click());
+    for (const [index, value] of [hour, minute].entries()) {
+      const option = await wait(() => {
+        const column = picker.querySelectorAll('.time-picker-body-wrp .time-picker-panel-select-wrp')[index];
+        return column && scheduleOption(column, '.time-picker-panel-select-item:not(.time-select-disabled)', value);
+      }, index === 0 ? '等待 B 站定时小时' : '等待 B 站定时分钟', 10000);
+      ctx.edit(() => option.click());
+    }
+    // Closing the picker commits its pending hour and minute.
+    ctx.edit(() => documentRoot.body.click());
+  }
+  await wait(() => enabled() && readDate() === date && readTime() === time, '核验 B 站定时发布时间', 10000);
+  return `已设置并回读 B 站定时发布时间 ${date} ${time}；`;
 }
 
 async function setBilibiliCover(documentRoot: Document, cover: Asset, wait: BilibiliWait, ctx: FillContext): Promise<string> {

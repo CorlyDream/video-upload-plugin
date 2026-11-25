@@ -6,7 +6,7 @@ const bundle = await build({configFile:false, logLevel:'silent', build:{write:fa
 const code = (Array.isArray(bundle) ? bundle[0] : bundle).output.find(file => file.type === 'chunk').code;
 const browser = await chromium.launch({headless:true});
 try {
-  for (const mode of ['success', 'generated-title', 'existing', 'cancel', 'delayed-upload', 'rejected-tag', 'check-error']) {
+  for (const mode of ['success', 'unsupported-minute', 'generated-title', 'existing', 'cancel', 'delayed-upload', 'rejected-tag', 'check-error']) {
     const page = await browser.newPage();
     await page.setContent(`
       <div class="bcc-upload-wrapper"><input type="file" accept=".mp4,.flv,.mov,.webm" multiple style="display:none"></div>
@@ -40,8 +40,24 @@ try {
       const tagInput=document.querySelector('input[placeholder="按回车键Enter创建标签"]');
       tagInput.addEventListener('keydown',event=>{if(event.key!=='Enter'||!tagInput.value.trim())return;const chip=document.createElement('div');chip.className='label-item-v2-container';chip.innerHTML='<p class="label-item-v2-content"></p>';chip.querySelector('p').textContent=tagInput.value.trim();document.querySelector('.tag-pre-wrp').append(chip);tagInput.value='';});
       const switchControl=document.querySelector('.switch-container');switchControl.onclick=()=>switchControl.classList.add('switch-container-active');
-      const dateControl=document.querySelector('.date-picker-date');dateControl.onclick=()=>{const button=document.createElement('button');button.textContent='2026-11-15';button.onclick=()=>{dateControl.querySelector('.date-show').textContent='2026-11-15';button.remove();};document.body.append(button);};
-      const timeControl=document.querySelector('.date-picker-timer');timeControl.onclick=()=>{for(const text of ['12','30']){const button=document.createElement('button');button.textContent=text;button.onclick=()=>button.remove();document.body.append(button);}const confirm=document.createElement('button');confirm.textContent='确定';confirm.onclick=()=>{timeControl.querySelector('.date-show').textContent='12:30';confirm.remove();};document.body.append(confirm);};
+      const dateControl=document.querySelector('.date-picker-date');
+      dateControl.onclick=()=>{
+        const panel=document.createElement('div');
+        panel.className='date-picker-container';
+        panel.innerHTML='<p class="date-picker-nav-title">2026年11月</p><div class="date-wrp"><div class="date-item">15</div></div>';
+        panel.querySelector('.date-item').onclick=event=>{event.stopPropagation();dateControl.querySelector('.date-show').textContent='2026-11-15';panel.remove();};
+        dateControl.append(panel);
+      };
+      const timeControl=document.querySelector('.date-picker-timer');
+      timeControl.onclick=()=>{
+        const panel=document.createElement('div');
+        panel.className='time-picker-body-wrp';
+        panel.innerHTML='<div class="time-picker-panel-select-wrp"><span class="time-picker-panel-select-item">12</span></div><div class="time-picker-panel-select-wrp"><span class="time-picker-panel-select-item">30</span></div>';
+        const picks=[];
+        for(const option of panel.querySelectorAll('span')) option.onclick=event=>{event.stopPropagation();picks.push(option.textContent);};
+        timeControl.append(panel);
+        document.body.addEventListener('click',event=>{if(event.target===document.body){if(picks.length===2)timeControl.querySelector('.date-show').textContent=picks.join(':');panel.remove();}});
+      };
     }, mode);
     await page.addScriptTag({content:code});
       const result = await page.evaluate(async mode => {
@@ -50,7 +66,7 @@ try {
       try {
         const blob=new Blob(['cover'],{type:'image/png'});
         const rejected=[];
-        const reason=await bili.fillBilibili(document, {title:'小熊洗脸', description:'和小熊一起学习洗脸的英语表达。', tags:['英语启蒙','亲子英语'], scheduleAt: mode === 'success' ? '2026-11-15T12:30' : undefined}, {signal:controller.signal, rejectedTags:tags=>{rejected.splice(0,rejected.length,...tags);}, checkTag:async tag=>{if(mode==='check-error')throw new Error('校验服务异常');return mode==='rejected-tag'&&tag==='英语启蒙'?{accepted:false,reason:'当前tag为话题专用，不允许自定义添加'}:{accepted:true};}, generatedTitle: mode === 'generated-title' ? 'merged' : undefined, cover:{id:'cover',batchId:'test',name:'cover.png',type:'image/png',size:blob.size,lastModified:0,createdAt:0,blob}, edit:fn=>fn(), progress:()=>{}});return {reason,rejected};
+        const reason=await bili.fillBilibili(document, {title:'小熊洗脸', description:'和小熊一起学习洗脸的英语表达。', tags:['英语启蒙','亲子英语'], scheduleAt: mode === 'success' ? '2026-11-15T12:30' : mode === 'unsupported-minute' ? '2026-11-15T12:08' : undefined}, {signal:controller.signal, rejectedTags:tags=>{rejected.splice(0,rejected.length,...tags);}, checkTag:async tag=>{if(mode==='check-error')throw new Error('校验服务异常');return mode==='rejected-tag'&&tag==='英语启蒙'?{accepted:false,reason:'当前tag为话题专用，不允许自定义添加'}:{accepted:true};}, generatedTitle: mode === 'generated-title' ? 'merged' : undefined, cover:{id:'cover',batchId:'test',name:'cover.png',type:'image/png',size:blob.size,lastModified:0,createdAt:0,blob}, edit:fn=>fn(), progress:()=>{}});return {reason,rejected};
       } catch (error) { return {error:error.message}; }
     }, mode);
     const state = await page.evaluate(() => ({
@@ -79,6 +95,9 @@ try {
       if(mode==='rejected-tag'){assert.deepEqual(result.rejected,[{tag:'英语启蒙',reason:'当前tag为话题专用，不允许自定义添加'}]);assert.match(result.reason,/已跳过/);}
       assert.equal(state.cover, 'cover.png');
       assert.equal(state.modal, 0);
+    } else if (mode === 'unsupported-minute') {
+      assert.match(result.error, /B 站.*5 分钟/);
+      assert.equal(await page.locator('.switch-container-active').count(), 0);
     } else if(mode==='check-error'){
       assert.match(result.error,/校验服务异常/);assert.deepEqual(state.tags,['记录']);
     } else {

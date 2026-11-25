@@ -15,11 +15,38 @@ try {
  assert.deepEqual({portrait:selected.portrait?.id,landscape:selected.landscape?.id},{portrait:'main-portrait',landscape:'other-landscape'});
  await selectionPage.close();
  const schedulePage=await browser.newPage();
- await schedulePage.setContent('<input placeholder="填写短标题有机会获得更多流量"><div contenteditable data-placeholder="添加描述"></div><div>重新上传</div><label><input type="radio" value="0">不定时</label><label><input type="radio" value="1">定时</label><input placeholder="请选择发表时间" value="2026-11-14 14:00">');
+ await schedulePage.setContent(`
+   <input placeholder="填写短标题有机会获得更多流量"><div contenteditable data-placeholder="添加描述"></div>
+   <div>重新上传</div><label><input type="radio" value="0">不定时</label><label><input type="radio" value="1">定时</label>
+   <div class="weui-desktop-picker__date-time">
+     <input readonly placeholder="请选择发表时间" value="2026-11-14 14:00">
+     <span class="weui-desktop-picker__icon-wrap">日历</span>
+     <div class="weui-desktop-picker__panel_day" hidden>
+       <div><span class="weui-desktop-picker__panel__label">2026年</span><span class="weui-desktop-picker__panel__label">11月</span></div>
+       <table class="weui-desktop-picker__table"><tr><td><a>15</a></td></tr></table>
+       <span class="weui-desktop-icon__time">时间</span>
+       <div class="weui-desktop-picker__dd__time" hidden>
+         <ol class="weui-desktop-picker__time__hour"><li>12</li></ol>
+         <ol class="weui-desktop-picker__time__minute"><li>30</li></ol>
+       </div>
+     </div>
+   </div>
+ `);
+ await schedulePage.evaluate(()=>{
+   const field=document.querySelector('input[placeholder="请选择发表时间"]');
+   const calendar=document.querySelector('.weui-desktop-picker__panel_day');
+   const time=document.querySelector('.weui-desktop-picker__dd__time');
+   document.querySelector('.weui-desktop-picker__icon-wrap').onclick=()=>calendar.hidden=!calendar.hidden;
+   document.querySelector('.weui-desktop-icon__time').onclick=()=>time.hidden=!time.hidden;
+   let date='2026-11-14', hour='14';
+   calendar.querySelector('a').onclick=()=>date='2026-11-15';
+   time.querySelector('.weui-desktop-picker__time__hour li').onclick=()=>hour='12';
+   time.querySelector('.weui-desktop-picker__time__minute li').onclick=()=>field.setAttribute('value',date+' '+hour+':30');
+ });
  await schedulePage.addScriptTag({content:code});
  const scheduleResult=await schedulePage.evaluate(async()=>{const c=new AbortController();return wx.fillWeixin(document,{title:'标题',description:'描述',tags:[],scheduleAt:'2026-11-15T12:30'},{signal:c.signal,edit:fn=>fn(),progress:()=>{}});});
  assert.match(scheduleResult,/已设置并回读视频号定时发布时间/);
- assert.equal(await schedulePage.locator('input[placeholder="请选择发表时间"]').inputValue(),'2026-11-15 12:30');
+ assert.equal(await schedulePage.locator('input[placeholder="请选择发表时间"]').getAttribute('value'),'2026-11-15 12:30');
  await schedulePage.close();
  const collectionPage=await browser.newPage();
  await collectionPage.setContent('<div>重新上传</div><input placeholder="填写短标题有机会获得更多流量"><div contenteditable data-placeholder="添加描述"></div><div class="post-album-wrap"><div class="post-album-display"><div class="display-text">选择合集</div></div><div class="filter-wrap" style="display:none"><div class="option-item"><div class="item"><div class="name">英语启蒙</div><div class="desc">共20个内容</div></div></div></div></div>');

@@ -135,11 +135,15 @@ if (!scope.__videoUploadM0) {
       try { port.postMessage({ type: 'checkpoint', checkpoint: task }); } catch { clean(); }
     };
     const abort = (reason: string) => { report('aborted', reason); clean(); };
+    const xiaohongshuScheduleEdit = (event: Event) => task?.platform === 'xiaohongshu' && !!task.publication?.scheduleAt
+      && matchesControl(event, '.post-time-wrapper,.d-datepicker-body:has(.d-timepicker-timebar)');
     // Native input/change events can be trusted even when a page script caused them.
-    const edited = (event: Event) => { if (event.isTrusted && !ownSynchronousEdit) abort('检测到你在平台页面编辑，已停止操作'); };
+    const edited = (event: Event) => {
+      if (event.isTrusted && !ownSynchronousEdit && !xiaohongshuScheduleEdit(event)) abort('检测到你在平台页面编辑，已停止操作');
+    };
     const takeOverControl = () => abort('检测到你操作平台控件，已交由你接管');
     const clicked = (event: Event) => {
-      if (event.isTrusted && matchesControl(event, clickControls)) takeOverControl();
+      if (event.isTrusted && !xiaohongshuScheduleEdit(event) && matchesControl(event, clickControls)) takeOverControl();
     };
     const watchEdits = (editor: Document) => {
       if (watchedDocuments.has(editor)) return;
@@ -148,10 +152,10 @@ if (!scope.__videoUploadM0) {
       editor.addEventListener('beforeinput', edited, options);
       editor.addEventListener('click', clicked, options);
       editor.addEventListener('pointerdown', event => {
-        if (event.isTrusted && event.button === 0 && matchesControl(event, nativeEditControls)) takeOverControl();
+        if (event.isTrusted && event.button === 0 && !xiaohongshuScheduleEdit(event) && matchesControl(event, nativeEditControls)) takeOverControl();
       }, options);
       editor.addEventListener('keydown', event => {
-        if (!event.isTrusted || !matchesControl(event, nativeEditControls)) return;
+        if (!event.isTrusted || xiaohongshuScheduleEdit(event) || !matchesControl(event, nativeEditControls)) return;
         if (event.key.length === 1 || /^(Arrow(Up|Down|Left|Right)|Enter|Home|End|PageUp|PageDown|Backspace|Delete)$/.test(event.key)) takeOverControl();
       }, options);
     };

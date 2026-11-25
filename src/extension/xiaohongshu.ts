@@ -1,3 +1,4 @@
+import {scheduleOption, selectScheduleMonth, type SchedulePickerWait} from './schedule-picker';
 import { publicationBody, type Publication } from '../core/publication';
 import type { Asset } from '../core/model';
 import {checkedState, declarationDisabled, declarationVisible, ensureChecked, findDeclarationControl, findDeclarationText, selectAiDeclaration} from './declarations';
@@ -84,6 +85,49 @@ export async function selectXiaohongshuCollection(name: string, context: Pick<Fi
   }, signal, 10000, true, '核验小红书合集选择');
   return `已选择并回读小红书合集“${expected}”；`;
 }
+async function setXiaohongshuPicker(
+  scope: ParentNode,
+  trigger: HTMLElement,
+  date: string,
+  time: string,
+  context: Pick<FillContext, 'signal' | 'edit'>,
+) {
+  const {signal, edit} = context;
+  const wait: SchedulePickerWait = (read, label) => waitFor(read, signal, 10000, true, label);
+  const input = () => one<HTMLInputElement>('input.d-text', trigger);
+  const current = () => scope.querySelector('.d-datepicker-input-filter-shadow')?.textContent?.trim();
+  const expected = `${date} ${time}`;
+  if (current() === expected && input()?.value === expected) return;
+
+  // Delight renders the calendar outside the schedule row and opens it on focus.
+  const panel = () => one<HTMLElement>('.d-datepicker-body:has(.d-timepicker-timebar)');
+  if (!panel()) edit(() => trigger.dispatchEvent(new FocusEvent('focusin', {bubbles: true})));
+  await wait(panel, '等待小红书定时日历');
+  if (!current()?.startsWith(date + ' ')) {
+    await selectScheduleMonth(date, () => panel()?.querySelector('.d-datepicker-selector')?.textContent ?? '', direction => {
+      const arrows = panel()?.querySelectorAll<HTMLElement>('.d-datepicker-header > div .d-icon');
+      const arrow = arrows?.length === 4 ? arrows[direction === 'next' ? 2 : 1] : undefined;
+      if (!arrow) throw new Error('小红书定时日历无法切换月份，请手动检查');
+      edit(() => arrow.click());
+    }, wait, '小红书');
+    const calendar = await wait(panel, '等待小红书定时日历');
+    const day = await wait(() => scheduleOption(calendar, '.d-datepicker-cell:not(.disabled):not(.--color-text-placeholder)', String(Number(date.slice(-2)))), '等待小红书定时日期');
+    edit(() => day.click());
+  }
+  for (const [index, value] of time.split(':').entries()) {
+    const option = await wait(() => {
+      const column = panel()?.querySelectorAll('.d-timepicker-timebar')[index];
+      if (!column) return;
+      const selectedLabel = value + (index === 0 ? '时' : '分');
+      return scheduleOption(column, '.d-timepicker-time.active:not(.disabled)', selectedLabel)
+        ?? scheduleOption(column, '.d-timepicker-time:not(.disabled)', value);
+    }, index === 0 ? '等待小红书定时小时' : '等待小红书定时分钟');
+    if (!option.classList.contains('active')) edit(() => option.click());
+  }
+  edit(() => { input()?.blur(); document.body.click(); });
+  await wait(() => !panel() && current() === expected && input()?.value === expected, '核验小红书定时发布时间');
+}
+
 /** Enable Xiaohongshu's schedule control and verify its selected local time. */
 export async function setXiaohongshuSchedule(scheduleAt: string, context: Pick<FillContext, 'signal' | 'progress' | 'edit'>): Promise<string> {
   const {signal, progress, edit} = context;
@@ -98,7 +142,6 @@ export async function setXiaohongshuSchedule(scheduleAt: string, context: Pick<F
     : controlScope.querySelector<HTMLInputElement>('input[type="checkbox"]');
   const switchControl = control.getAttribute('role') === 'switch' ? control : controlScope.querySelector<HTMLElement>('[role="switch"]');
   const enabled = () => checkbox ? checkbox.checked : switchControl ? switchControl.getAttribute('aria-checked') === 'true' : true;
-  const wasEnabled = enabled();
   if (!checkbox && !switchControl) {
     edit(() => control.click());
   } else if (!enabled()) {
@@ -106,6 +149,11 @@ export async function setXiaohongshuSchedule(scheduleAt: string, context: Pick<F
     await waitFor(() => enabled(), signal, 10000, true, '核验小红书定时发布开关');
   }
   const scope = controlScope as ParentNode;
+  const picker = one<HTMLElement>('.d-datepicker-wrapper', scope);
+  if (picker) {
+    await setXiaohongshuPicker(scope, picker, date, time, context);
+    return `已设置并回读定时发布时间 ${scheduleDisplay(scheduleAt)}；请检查后手动发布。`;
+  }
   const roots = [scope, document].filter((root, index, all) => all.indexOf(root) === index);
   const panel = roots.find(root => root.querySelector('input[type="datetime-local"],input[type="date"],input[type="time"]') || labeledScheduleInputs(root).length >= 2) ?? document;
   const datetime = scheduleInput(panel, 'datetime-local');
@@ -113,9 +161,6 @@ export async function setXiaohongshuSchedule(scheduleAt: string, context: Pick<F
   const timeInput = datetime ? undefined : scheduleInput(panel, 'time');
   const labeled = datetime || dateInput || timeInput ? [] : labeledScheduleInputs(panel);
   if (!datetime && (!dateInput || !timeInput) && labeled.length < 2) throw new Error('未找到小红书定时日期和时间控件，请手动设置');
-  const currentDate = datetime?.value ?? dateInput?.value ?? labeled.find(input => /日期/.test(`${input.getAttribute('aria-label') ?? ''} ${input.placeholder ?? ''}`))?.value ?? '';
-  const currentTime = datetime ? '' : timeInput?.value ?? labeled.find(input => /时间/.test(`${input.getAttribute('aria-label') ?? ''} ${input.placeholder ?? ''}`))?.value ?? '';
-  if (wasEnabled && ((datetime && currentDate && currentDate !== scheduleAt) || (!datetime && (currentDate || currentTime) && (currentDate !== date || currentTime !== time)))) throw new Error('编辑页已有不同的定时发布时间，未覆盖，请手动检查');
   edit(() => {
     if (datetime) setInputValue(datetime, scheduleAt);
     else if (dateInput && timeInput) { setInputValue(dateInput, date); setInputValue(timeInput, time); }

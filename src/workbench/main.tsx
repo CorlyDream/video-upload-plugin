@@ -12,17 +12,13 @@ void diagnostics.record('page.loaded');
 import { requestPermission } from '../core/permission-wait';
 import { connectWorkbench, type ConnectionState } from '../core/connection';
 import { inspectCover } from '../core/covers';
-import { normalizePublication, normalizeDouyinPublication, parseTags, scheduleWindowMs } from '../core/publication';
+import { normalizePublication, normalizeDouyinPublication, parseTags } from '../core/publication';
 import { coverPkEnabled, flattenCovers, MAX_LOCAL_COVERS, splitCovers } from '../core/cover-order';
 import { readStoredCollection, readStoredTags, restoreCollection, restoreTags, writeStoredCollection, writeStoredTags } from '../core/tag-storage';
 import { CoverPreviewList } from './CoverPreviewList';
+import { ScheduleField } from './ScheduleField';
 
 const labels: Record<TaskStatus, string> = { checking: '检查页面', transferring: '传递文件', needs_attention: '需你处理', paused: '已暂停', aborted: '已中止', failed: '失败' };
-function localDateTimeValue(offsetMs: number) {
-  const date = new Date(Date.now() + offsetMs);
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
 function App() {
   const [batch, setBatch] = useState<Batch>();
   const [selected, setSelected] = useState<PlatformId[]>(() => platforms.map(platform => platform.id));
@@ -131,7 +127,17 @@ function App() {
     } catch {setError('导出诊断日志失败，请检查浏览器下载设置');}
   }
   const active = batch?.tasks.some(task => isActive(task.status));
-  const metadataLocked = !connected || !batch || busy || running || active || !!batch.tasks.length;
+  const scheduleLocked = !connected || !batch || busy || running || !!active;
+  const hasAttempts = !!batch?.tasks.length;
+  const metadataLocked = scheduleLocked || hasAttempts;
+  const scheduleChanged = hasAttempts && scheduleAt !== (batch?.publication?.scheduleAt ?? '');
+  async function saveSchedule() {
+    if (!batch || scheduleLocked || !scheduleChanged) return;
+    setBusy(true); setError('');
+    try { await request({type:'schedule', batchId:batch.id, scheduleAt:scheduleAt || undefined}); }
+    catch (error) { setError((error as Error).message); }
+    finally { setBusy(false); }
+  }
   const pendingPlatforms = selected.filter(id => !batch?.tasks.some(task => task.platform === id));
   async function chooseCover(files: File[]) {
     if (!files.length || !batch || metadataLocked) return;
@@ -194,6 +200,7 @@ function App() {
     const targets = platforms.filter(item => selected.includes(item.id) && !batch?.tasks.some(task => task.platform === item.id));
     try {
       if (!targets.length) throw new Error('所选平台均已尝试，请检查原页面');
+      if (scheduleChanged) throw new Error('请先保存修改后的定时发布时间');
       const publicationWithSchedule = normalizePublication({title, description, tags: parseTags(tags), collection, scheduleAt: scheduleAt || undefined}, false);
       if (targets.some(p=>p.id === 'xiaohongshu')) normalizePublication(publicationWithSchedule);
       if (targets.some(p=>p.id === 'douyin')) normalizeDouyinPublication(publicationWithSchedule);
@@ -223,6 +230,7 @@ function App() {
   }
   async function retry(taskId:string) {
     if(runningRef.current || busy || active)return;
+    if (scheduleChanged) { setError('请先保存修改后的定时发布时间'); return; }
     runningRef.current=true;stopped.current=false;setRunning(true);setError('');setStartPhase('正在确认原页面已关闭并复用已保存素材…');
     try {await request({type:'retry',taskId});await waitForHandoff();}
     catch(error){setError(error instanceof Error?error.message:'重新打开失败，素材仍保留');}
@@ -261,8 +269,9 @@ function App() {
           <input aria-label="选择本地视频" type="file" accept="video/*" disabled={!connected || busy || !!batch} onChange={event => { void choose(event.target.files?.[0]); event.target.value = ''; }} />
         </label>
         {batch && <p className="file-info"><span aria-hidden="true">●</span> {(batch.asset.size / 1024 / 1024).toFixed(1)} MiB · 仅缓存于此浏览器</p>}
-        <fieldset className="publication-fields" disabled={metadataLocked}>
-          <legend><span>填写内容</span><small>留空字段会跳过</small></legend>
+        <section className="publication-fields" aria-labelledby="publication-heading">
+          <fieldset className="publication-group" disabled={metadataLocked}>
+          <legend><span id="publication-heading">填写内容</span><small>留空字段会跳过</small></legend>
           <label><span className="field-label">标题 <small>{title.length}/20</small></span><input name="title" autoComplete="off" aria-label="标题" value={title} onChange={e=>setTitle(e.target.value)} placeholder="例如：今天的工作记录…" /></label>
           {!!batch?.externalImport?.candidateTitles.length && <label>
             <span className="field-label">候选标题</span>
@@ -273,17 +282,22 @@ function App() {
           </label>}
           <label><span className="field-label">内容描述 <small>{description.length} 字</small></span><textarea name="description" autoComplete="off" aria-label="内容描述" rows={4} value={description} onChange={e=>setDescription(e.target.value)} placeholder="写下这条视频的重点…" /></label>
           <label><span className="field-label">标签 <small>用逗号或换行分隔</small></span><textarea name="tags" autoComplete="off" aria-label="标签" rows={2} value={tags} onChange={e=>setTags(e.target.value)} placeholder="#日常，工作记录…" /></label>
+          </fieldset>
           <div className="field-grid">
-            <label>
+            <fieldset disabled={metadataLocked}><legend className="sr-only">合集</legend><label>
               <span className="field-label">合集名称</span>
               <input name="collection" autoComplete="off" aria-label="合集名称" aria-describedby="collection-help" value={collection} onChange={e=>setCollection(e.target.value)} placeholder="平台上已有的合集名称" />
               <small id="collection-help" className="hint">小红书、抖音、视频号按名称匹配已有合集，留空时跳过。</small>
-            </label>
-            <label><span className="field-label">定时发布时间 <small>未来 7 天内</small></span><span className="schedule-controls"><input name="scheduleAt" aria-label="定时发布时间" type="datetime-local" value={scheduleAt} min={localDateTimeValue(60_000)} max={localDateTimeValue(scheduleWindowMs)} onChange={e=>setScheduleAt(e.target.value)} /><button type="button" onClick={()=>setScheduleAt('')} disabled={!scheduleAt} aria-label="清除定时发布时间">清除</button></span></label>
+            </label></fieldset>
+            <ScheduleField value={scheduleAt} onChange={setScheduleAt} disabled={scheduleLocked}
+              onSave={hasAttempts ? () => void saveSchedule() : undefined} saved={!scheduleChanged} />
           </div>
+          <fieldset className="publication-group" disabled={metadataLocked}>
+            <legend className="sr-only">封面和平台设置</legend>
           <div className="cover-options"><label><span className="field-label">封面图 <small>本地添加最多 4 张</small></span><input aria-label="选择封面图片" type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={e=>{void chooseCover(Array.from(e.target.files ?? []));e.target.value='';}} /></label><CoverPreviewList items={flattenCovers(cover, pkCovers)} disabled={metadataLocked} onChange={updateCoverOrder} /><p className="hint">第一张是主图，后续是 PK 候选。小红书使用前 4 张，请在平台页面检查裁剪效果。</p></div>
           <details className="advanced-options"><summary>平台填写说明</summary><div className="advanced-content"><p className="hint">标签会以 #文本 填入正文；合集与定时控件只在平台支持时填写并回读。</p></div></details>
-        </fieldset>
+          </fieldset>
+        </section>
         <section className="platform-picker" aria-labelledby="platform-title"><div className="section-heading"><div><p className="section-kicker">STEP 3</p><h2 id="platform-title">选择目标平台</h2></div><span className="selection-count">{pendingPlatforms.length} 个待交接</span></div><p className="hint">可多选。已完成的平台会自动跳过。</p>
           <fieldset disabled={running || active || busy}><legend className="sr-only">选择目标平台</legend><div className="platform-grid">{platforms.map(platform => <label className={`platform ${selected.includes(platform.id) ? 'is-selected' : ''}`} key={platform.id}><input type="checkbox" checked={selected.includes(platform.id)} onChange={event => { const checked = event.currentTarget.checked; setSelected(ids => checked ? [...ids, platform.id] : ids.filter(id => id !== platform.id)); }} /><span className="platform-check" aria-hidden="true">{selected.includes(platform.id) ? '✓' : ''}</span><span>{platform.name}</span><small>{batch?.tasks.some(task => task.platform === platform.id) ? '已尝试' : '待验证'}</small></label>)}</div></fieldset>
         </section>

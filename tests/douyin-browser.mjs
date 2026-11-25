@@ -29,10 +29,15 @@ try{for(const mode of ['success','existing','rollback','wrong-image','cancel']){
  },mode);
  await page.addScriptTag({content:code});
  const result=await page.evaluate(async mode=>{
+  const date=new Date();
+  date.setDate(date.getDate()+1);
+  date.setHours(12,30,0,0);
+  const month=String(date.getMonth()+1).padStart(2,'0'), day=String(date.getDate()).padStart(2,'0');
+  const scheduleAt=`${date.getFullYear()}-${month}-${day}T12:30`;
   const make=async(w,h,name)=>{const c=document.createElement('canvas');c.width=w;c.height=h;const ctx=c.getContext('2d');ctx.fillStyle='red';ctx.fillRect(0,0,w,h);const blob=await new Promise(r=>c.toBlob(r));return {blob,name,type:'image/png'};};
   const cover=await make(40,30,'horizontal.png'),portrait=await make(30,40,'vertical.png');
   const abort=new AbortController();if(mode==='cancel')abort.abort();const timer=setTimeout(()=>abort.abort(),mode==='wrong-image'?2200:6500);
-  try{return {reason:await dy.fillDouyin({title:mode==='success'?'英语启蒙合集':'小熊洗脸',description:'一起学英语\nWash your face!',tags:['亲子英语'],collection:mode==='success'?'英语启蒙合集':'',scheduleAt:mode==='success'?'2026-11-15T12:30':undefined},cover,{signal:abort.signal,edit:fn=>fn(),progress:()=>{}},[portrait])};}catch(e){return {error:e.message};}finally{clearTimeout(timer);}
+  try{return {reason:await dy.fillDouyin({title:mode==='success'?'英语启蒙合集':'小熊洗脸',description:'一起学英语\nWash your face!',tags:['亲子英语'],collection:mode==='success'?'英语启蒙合集':'',scheduleAt:mode==='success'?scheduleAt:undefined},cover,{signal:abort.signal,edit:fn=>fn(),progress:()=>{}},[portrait])};}catch(e){return {error:e.message};}finally{clearTimeout(timer);}
  },mode);
  const state=await page.evaluate(()=>({confirms,submissions,names,collectionClicks,collection:document.querySelector('#collection-trigger').textContent,title:document.querySelector('input').value,body:document.querySelector('[contenteditable]').textContent}));
  assert.equal(state.submissions,0);

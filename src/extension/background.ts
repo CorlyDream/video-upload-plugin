@@ -246,6 +246,14 @@ async function command(command: WorkbenchCommand, owner: chrome.runtime.Port) {
       try { await persist(); } catch (error) { Object.assign(batch, previous); throw error; }
       return;
     }
+    case 'schedule': {
+      const batch = state.batch;
+      if (!batch || batch.id !== command.batchId || active()) throw new Error('当前批次不可修改定时时间');
+      const previous = batch.publication;
+      batch.publication = normalizePublication({...previous, scheduleAt: command.scheduleAt}, false);
+      try { await persist(); } catch (error) { batch.publication = previous; throw error; }
+      return;
+    }
     case 'resume': {
       if (active()) throw new Error('已有任务正在处理');
       const task = state.batch?.tasks.find(item => item.taskId === command.taskId);
@@ -265,6 +273,7 @@ async function command(command: WorkbenchCommand, owner: chrome.runtime.Port) {
         await persist();void reconcileBilibiliDraft(task,owner);return;
       }
       if (task.platform === 'bilibili' && !task.completedStages) throw new Error('这是旧版 B 站投稿记录，请先检查已投稿稿件；不能作为草稿继续');
+      if (task.publication?.scheduleAt !== state.batch?.publication?.scheduleAt) throw new Error('定时时间已修改，请关闭原平台页面后使用“保留素材重新打开”');
       if (task.tabId === undefined || task.documentId === '') throw new Error('当前页面身份已失效，请重新打开平台页面');
       const tab = await chrome.tabs.get(task.tabId);
       const platform = platforms.find(item => item.id === task.platform)!;

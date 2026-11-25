@@ -32,11 +32,13 @@ it('keeps a trimmed optional collection name without changing shared copy', () =
 it('keeps a future schedule time and rejects malformed or past values', () => {
   const localValue = (offset: number) => {
     const date = new Date(Date.now() + offset);
+    date.setMinutes(Math.floor(date.getMinutes() / 5) * 5);
     const pad = (value: number) => String(value).padStart(2, '0');
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
   };
   const withinWindow = localValue(2 * 24 * 60 * 60 * 1000);
   expect(normalizePublication({scheduleAt:withinWindow}).scheduleAt).toBe(withinWindow);
+  expect(() => normalizePublication({scheduleAt:withinWindow.slice(0, -2) + '08'})).toThrow(/5 分钟/);
   expect(() => normalizePublication({scheduleAt:'2099-1-2T3:04'})).toThrow(/格式/);
   expect(() => normalizePublication({scheduleAt:'2000-01-02T03:04'})).toThrow(/晚于/);
   expect(() => normalizePublication({scheduleAt:localValue(scheduleWindowMs + 24 * 60 * 60 * 1000)})).toThrow(/7 天/);

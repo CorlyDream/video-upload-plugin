@@ -76,8 +76,9 @@ h3 { margin: 0; color: var(--ink); font-size: 15px; }
 .file-info { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
 .file-info > span { color: var(--success); font-size: 9px; vertical-align: 1px; }
 .publication-fields { display: grid; gap: 14px; margin: 24px 0 26px; padding: 0; border: 0; }
-.publication-fields legend { display: flex; align-items: baseline; justify-content: space-between; width: 100%; margin: 0 0 2px; padding: 0; color: var(--ink); font-size: 16px; font-weight: 700; }
-.publication-fields legend small { color: var(--muted); font-size: 11px; font-weight: 400; }
+.publication-group { display: grid; gap: 14px; }
+.publication-group > legend:not(.sr-only) { display: flex; align-items: baseline; justify-content: space-between; width: 100%; margin: 0 0 2px; padding: 0; color: var(--ink); font-size: 16px; font-weight: 700; }
+.publication-group > legend small { color: var(--muted); font-size: 11px; font-weight: 400; }
 .publication-fields label { display: grid; gap: 6px; min-width: 0; }
 .field-label { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: #33435a; font-size: 12px; font-weight: 700; }
 .field-label small { color: var(--muted); font-size: 10px; font-weight: 400; }
@@ -86,10 +87,12 @@ h3 { margin: 0; color: var(--ink); font-size: 15px; }
 .publication-fields textarea { min-height: 72px; resize: vertical; }
 .publication-fields :disabled { cursor: not-allowed; opacity: .64; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; align-items: start; gap: 12px; }
-.schedule-controls { display: flex; align-items: stretch; gap: 6px; min-width: 0; }
-.schedule-controls input { flex: 1; min-width: 0; }
-.schedule-controls button { flex: none; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: #fff; color: #52647d; font-size: 12px; cursor: pointer; }
-.schedule-controls button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.schedule-field > legend { margin-bottom: 6px; }
+.schedule-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; min-width: 0; }
+.schedule-controls button { grid-column: 1 / -1; justify-self: start; }
+.schedule-field button { padding: 5px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: #fff; color: #52647d; font-size: 12px; cursor: pointer; }
+.schedule-field button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.schedule-save { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
 .cover-options { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
 .advanced-options, .utility-actions { border-top: 1px solid var(--line); }
 .advanced-options summary, .utility-actions summary { padding: 11px 0; color: #44566e; cursor: pointer; font-size: 12px; font-weight: 700; list-style-position: inside; }

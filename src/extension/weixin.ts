@@ -1,3 +1,4 @@
+import {scheduleOption, selectScheduleMonth, type SchedulePickerWait} from './schedule-picker';
 import {publicationBody, type Publication} from '../core/publication';
 import {inspectCover, type CoverRatio} from '../core/covers';
 import type {Asset} from '../core/model';
@@ -311,23 +312,72 @@ async function setWeixinCollection(documentRoot: Document, name: string, ctx: Fi
   return `已选择并回读视频号合集 ${name}；`;
 }
 async function setWeixinSchedule(documentRoot: Document, scheduleAt: string, ctx: FillContext): Promise<string> {
-  const [date,time]=scheduleAt.split('T');
-  if(!date||!time)throw new Error('定时发布时间格式无效，请重新选择时间');
-  const roots=weixinSearchRoots(documentRoot);
-  const scheduled=roots.flatMap(root=>[...root.querySelectorAll<HTMLInputElement>('input[type="radio"][value="1"]')]).find(input=>visible(input)&&/定时/.test(input.parentElement?.parentElement?.textContent??''));
-  if(!scheduled)return '视频号编辑页没有定时控件，已跳过定时设置；';
-  ctx.progress('正在设置视频号定时发布时间','schedule');
-  const wasEnabled=scheduled.checked;
-  if(!wasEnabled){ctx.edit(()=>scheduled.click());await waitForWeixin(()=>scheduled.checked,ctx,'核验视频号定时发布开关',10000);}
-  const input=await waitForWeixin(()=>weixinScheduleInput(documentRoot),ctx,'等待视频号定时日期和时间控件',10000);
-  const display=`${date} ${time}`;
-  if(wasEnabled && input.value && input.value!==display && input.value!==scheduleAt)throw new Error('视频号编辑页已有不同的定时发布时间，未覆盖，请手动检查');
-  const inputPrototype=input.ownerDocument.defaultView?.HTMLInputElement.prototype ?? HTMLInputElement.prototype;
-  const setter=Object.getOwnPropertyDescriptor(inputPrototype,'value')?.set;
-  if(!setter)throw new Error('无法设置视频号定时发布时间');
-  ctx.edit(()=>{setter.call(input,display);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));});
-  await waitForWeixin(()=>input.value===display||input.value===scheduleAt,ctx,'核验视频号定时发布时间',10000);
-  return `已设置并回读视频号定时发布时间 ${display}；请检查后手动发表。`;
+  const [date, time] = scheduleAt.split('T');
+  if (!date || !time) throw new Error('定时发布时间格式无效，请重新选择时间');
+  const scheduled = weixinSearchRoots(documentRoot)
+    .flatMap(root => [...root.querySelectorAll<HTMLInputElement>('input[type="radio"][value="1"]')])
+    .find(input => visible(input) && /定时/.test(input.parentElement?.parentElement?.textContent ?? ''));
+  if (!scheduled) return '视频号编辑页没有定时控件，已跳过定时设置；';
+  ctx.progress('正在设置视频号定时发布时间', 'schedule');
+  const wait: SchedulePickerWait = (read, label) => waitForWeixin(read, ctx, label, 10000);
+  const wasEnabled = scheduled.checked;
+  if (!wasEnabled) {
+    ctx.edit(() => scheduled.click());
+    await wait(() => scheduled.checked, '核验视频号定时发布开关');
+  }
+  const input = await wait(() => weixinScheduleInput(documentRoot), '等待视频号定时日期和时间控件');
+  const display = `${date} ${time}`;
+  const matches = () => {
+    const value = weixinScheduleInput(documentRoot)?.value;
+    return value === display || value === scheduleAt;
+  };
+  const note = `已设置并回读视频号定时发布时间 ${display}；请检查后手动发表。`;
+  if (matches()) return note;
+  if (wasEnabled && input.value) throw new Error('视频号编辑页已有不同的定时发布时间，未覆盖，请手动检查');
+  const picker = input.closest('.weui-desktop-picker__date-time');
+  const openCalendar = picker?.querySelector<HTMLElement>('.weui-desktop-picker__icon-wrap');
+  if (!picker || !openCalendar) throw new Error('未找到视频号定时日历入口，请手动设置');
+  const calendar = () => {
+    const panel = picker.querySelector('.weui-desktop-picker__panel_day');
+    return panel && visible(panel) ? panel : undefined;
+  };
+  if (!calendar()) ctx.edit(() => openCalendar.click());
+  await wait(calendar, '等待视频号定时日历');
+  if (!input.value.startsWith(date + ' ')) {
+    await selectScheduleMonth(date, () => [...calendar()?.querySelectorAll('.weui-desktop-picker__panel__label') ?? []].map(e => e.textContent?.trim()).join(' '), direction => {
+      const suffix = direction === 'next' ? 'right' : 'left';
+      const arrow = calendar()?.querySelector<HTMLButtonElement>(`.weui-desktop-btn__icon__${suffix}`);
+      if (!arrow || !visible(arrow) || arrow.disabled) throw new Error('视频号定时日历无法切换月份，请手动检查');
+      ctx.edit(() => arrow.click());
+    }, wait, '视频号');
+    const day = await wait(() => {
+      const panel = calendar();
+      return panel && scheduleOption(panel, '.weui-desktop-picker__table a:not(.weui-desktop-picker__faded):not(.weui-desktop-picker__disabled)', String(Number(date.slice(-2))));
+    }, '等待视频号定时日期');
+    ctx.edit(() => day.click());
+  }
+  const openTime = picker.querySelector<HTMLElement>('.weui-desktop-icon__time');
+  if (!openTime) throw new Error('未找到视频号定时时间入口，请手动设置');
+  const timePanel = () => {
+    const panel = picker.querySelector('.weui-desktop-picker__dd__time');
+    return panel && visible(panel) ? panel : undefined;
+  };
+  if (!timePanel()) ctx.edit(() => openTime.click());
+  const [hour, minute] = time.split(':');
+  for (const [column, value] of [['hour', hour], ['minute', minute]] as const) {
+    const option = await wait(() => {
+      const panel = timePanel();
+      return panel && value ? scheduleOption(panel, `.weui-desktop-picker__time__${column} li:not(.weui-desktop-picker__disabled)`, value) : undefined;
+    }, column === 'hour' ? '等待视频号定时小时' : '等待视频号定时分钟');
+    ctx.edit(() => option.click());
+  }
+  if (timePanel()) {
+    ctx.edit(() => openTime.click());
+    await wait(() => !timePanel(), '关闭视频号定时时间选择器');
+  }
+  if (calendar()) ctx.edit(() => openCalendar.click());
+  await wait(() => scheduled.checked && !calendar() && matches(), '核验视频号定时发布时间');
+  return note;
 }
 
 /** Video Channels keeps the composer in a same-origin empty.html iframe. */

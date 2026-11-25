@@ -1,5 +1,6 @@
 /** Shared copy plus optional platform-specific settings. */
 export interface Publication { title: string; description: string; tags: string[]; collection?: string; scheduleAt?: string }
+export const scheduleStepMinutes = 5;
 export const scheduleWindowMs = 7 * 24 * 60 * 60 * 1000;
 export function parseTags(value: string): string[] {
   return value.split(/[,，\n]+/u).flatMap(part => part.split('#')).map(tag => tag.trim()).filter(Boolean);
@@ -17,6 +18,7 @@ export function normalizePublication(value?: Partial<Publication>, xiaohongshuLi
   if (scheduleAt !== undefined && (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(scheduleAt) || !Number.isFinite(Date.parse(scheduleAt)))) throw new Error('定时发布时间格式无效，请重新选择时间');
   if (scheduleAt !== undefined && Date.parse(scheduleAt) <= Date.now()) throw new Error('定时发布时间必须晚于当前时间');
   if (scheduleAt !== undefined && Date.parse(scheduleAt) > Date.now() + scheduleWindowMs) throw new Error('定时发布时间只能设置在未来 7 天内');
+  if (scheduleAt !== undefined && Number(scheduleAt.slice(-2)) % scheduleStepMinutes !== 0) throw new Error('定时发布时间请按 5 分钟档位选择');
   const tags = [...new Set(raw.map(tag => tag.trim().replace(/^#+/, '')).filter(Boolean))];
   if (xiaohongshuLimits && title.length > 20) throw new Error('小红书标题最多 20 字，请修改后再开始');
   if ((xiaohongshuLimits && tags.length > 10) || tags.some(tag => /[\s#]/u.test(tag) || tag.length > 30)) throw new Error('标签最多 10 个，每个最多 30 字，不能包含空格或 #');

@@ -3,6 +3,7 @@ export type WorkbenchCommand =
   | { type: 'get' }
   | { type: 'prepare'; asset: AssetMeta }
   | { type: 'configure'; publication: import('./publication').Publication; coverAssetId?: string; pkCoverAssetIds?: string[]; coverPk?: boolean }
+  | { type: 'schedule'; batchId: string; scheduleAt?: string }
   | { type: 'start'; platform: PlatformId }
   | { type: 'retry'; taskId: string }
   | { type: 'resume'; taskId: string }

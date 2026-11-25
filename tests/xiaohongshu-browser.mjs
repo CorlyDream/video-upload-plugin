@@ -28,6 +28,67 @@ try {
   assert.equal(await page.locator('input[aria-label="时间"]').inputValue(),'12:30');
   console.log('XIAOHONGSHU',JSON.stringify(result));
 
+  // The platform commits through its teleported picker, then redraws its input.
+  await page.setContent(`
+    <div class="post-time-wrapper">
+      <label><span>定时发布</span><input type="checkbox"></label>
+      <div class="d-datepicker-wrapper" tabindex="0" hidden>
+        <input class="d-text" value="2026-11-30 09:10">
+        <div class="d-datepicker-input-filter-shadow">2026-11-30 09:10</div>
+      </div>
+    </div>
+    <div class="d-datepicker-body" hidden>
+      <div class="d-datepicker-header">
+        <div><span class="d-icon"></span></div><div><span class="d-icon"></span></div>
+        <div class="d-datepicker-selector">2026年11月</div>
+        <div><span class="d-icon" id="next-month">下月</span></div><div><span class="d-icon"></span></div>
+      </div>
+      <div class="d-datepicker-cell --color-text-placeholder">1</div><div class="d-datepicker-cell" id="day" hidden>1</div>
+      <div class="d-timepicker-timebar"><div class="d-timepicker-time" id="hour">18</div></div>
+      <div class="d-timepicker-timebar"><div class="d-timepicker-time" id="minute">08</div></div>
+    </div>
+  `);
+  await page.evaluate(()=>{
+    const trigger=document.querySelector('.d-datepicker-wrapper');
+    const panel=document.querySelector('.d-datepicker-body');
+    document.querySelector('input[type=checkbox]').onchange=()=>trigger.hidden=false;
+    trigger.addEventListener('focusin',()=>panel.hidden=false);
+    document.querySelector('#next-month').onclick=()=>{
+      panel.querySelector('.d-datepicker-selector').textContent='2026年12月';
+      document.querySelector('#day').hidden=false;
+    };
+    let selectedDate='2026-11-30', hour='09', minute='10';
+    document.querySelector('#day').onclick=()=>selectedDate='2026-12-01';
+    document.querySelector('#hour').onclick=()=>hour='18';
+    document.querySelector('#minute').onclick=()=>minute='08';
+    document.body.onclick=event=>{
+      if(event.target!==document.body || panel.hidden)return;
+      panel.hidden=true;
+      const committed=selectedDate+' '+hour+':'+minute;
+      trigger.querySelector('input').outerHTML='<input class="d-text" value="'+committed+'">';
+      trigger.querySelector('.d-datepicker-input-filter-shadow').textContent=committed;
+    };
+  });
+  const pickerResult=await page.evaluate(()=>xh.setXiaohongshuSchedule('2026-12-01T18:08',{
+    signal:new AbortController().signal,edit:fn=>fn(),progress:()=>{},
+  }));
+  assert.match(pickerResult,/2026-12-01 18:08/);
+  assert.equal(await page.locator('.d-datepicker-input-filter-shadow').textContent(),'2026-12-01 18:08');
+
+  // An enabled schedule with a different value is replaced through the native picker.
+  const overwritten=await page.evaluate(async()=>{
+    const trigger=document.querySelector('.d-datepicker-wrapper');
+    trigger.querySelector('input').value='2026-12-01 18:15';
+    trigger.querySelector('.d-datepicker-input-filter-shadow').textContent='2026-12-01 18:15';
+    const hour=document.querySelector('#hour');
+    hour.classList.add('active');hour.textContent='18时';
+    await xh.setXiaohongshuSchedule('2026-12-01T18:08',{
+      signal:new AbortController().signal,edit:fn=>fn(),progress:()=>{},
+    });
+    return trigger.querySelector('input').value;
+  });
+  assert.equal(overwritten,'2026-12-01 18:08');
+
   // Live collection menus attach the selection handler to the inner content.
   await page.setContent(`<button class="collection-plugin-button">选择合集</button><div class="collection-plugin-popover-content" hidden><div class="item"><div class="item-content"><div class="item-label">幼儿英语</div></div></div></div>`);
   await page.evaluate(()=>{

@@ -189,6 +189,37 @@ describe('worker lifecycle races', () => {
     expect(task.reason).toContain('浏览器返回了无法访问的标签页编号');
     expect(harness.page.messages.filter(m=>m.type==='run')).toEqual([]);wb.disconnect();await settle();
   });
+  it('saves a new schedule for retry while preserving the original page attempt and its metadata', async () => {
+    const h = worker(), wb = port(1);
+    h.chrome.runtime.onConnect.emit(wb);
+    await settle();
+    const nextDay = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const pad = (value: number) => String(value).padStart(2, '0');
+    const day = `${nextDay.getFullYear()}-${pad(nextDay.getMonth() + 1)}-${pad(nextDay.getDate())}`;
+    const original = `${day}T18:05`, updated = `${day}T18:10`;
+    async function send(id: string, command: object) {
+      wb.onMessage.emit({id, command});
+      await settle();
+      return wb.messages.find(message => message.id === id);
+    }
+    const publication = {title:'测试', description:'描述', tags:['亲子'], scheduleAt:original};
+    await send('configure', {type:'configure', publication, coverAssetId:'cover'});
+    const first = (await send('start', {type:'start', platform:'xiaohongshu'})).snapshot.batch.tasks[0];
+    expect((await send('active', {type:'schedule', batchId:'batch', scheduleAt:updated})).ok).toBe(false);
+    await send('stop', {type:'stop'});
+    expect((await send('stale', {type:'schedule', batchId:'previous', scheduleAt:updated})).ok).toBe(false);
+    expect((await send('off-grid', {type:'schedule', batchId:'batch', scheduleAt:`${day}T18:08`})).ok).toBe(false);
+    const saved = (await send('save', {type:'schedule', batchId:'batch', scheduleAt:updated})).snapshot.batch;
+    expect(saved.publication).toEqual({...publication, scheduleAt:updated});
+    expect(saved.cover.id).toBe('cover');
+    expect(saved.tasks[0].publication.scheduleAt).toBe(original);
+    expect((await send('resume', {type:'resume', taskId:first.taskId})).ok).toBe(false);
+    const retried = (await send('retry', {type:'retry', taskId:first.taskId})).snapshot.batch.tasks[0];
+    expect(retried.publication).toEqual({...publication, scheduleAt:updated});
+    expect(retried.coverAssetId).toBe('cover');
+    wb.disconnect();
+    await settle();
+  });
   it('freezes ordered PK covers and rejects invalid PK batches', async () => {
     const harness=worker();const wb=port(1);harness.chrome.runtime.onConnect.emit(wb);await settle();
     for(const [id, extra] of Object.entries({tooMany:{pkCoverAssetIds:['pk1','pk2','pk3','pk4']},duplicate:{pkCoverAssetIds:['cover']},disabled:{coverPk:false,pkCoverAssetIds:['pk1']},foreign:{pkCoverAssetIds:['unknown']}})){

@@ -5,21 +5,41 @@ const bundle = await build({configFile:false,logLevel:'silent',build:{write:fals
 const code=(Array.isArray(bundle)?bundle[0]:bundle).output.find(f=>f.type==='chunk').code;
 const browser=await chromium.launch({headless:true});
 try {
-for(const mode of ['success','scaled-preview','rollback','existing','wrong-image','takeover','no-cover']){
+for(const mode of ['success','scaled-preview','prefilled','rollback','existing','wrong-image','takeover','no-cover']){
  const page=await browser.newPage();
- await page.setContent(`<div id="work-description-edit" contenteditable="true">${mode==='existing'?'原稿':''}</div><p>重新上传</p><label><span>定时发布</span><input type="radio" value="2"></label><input class="ant-picker-input" value="2026-11-14 12:48">
+ await page.setContent(`<div id="work-description-edit" contenteditable="true">${mode==='existing'?'原稿':''}</div><p>重新上传</p><label><span>定时发布</span><input type="radio" value="2"></label><div class="ant-picker"><input readonly placeholder="选择日期时间" value="2026-11-14 12:48" title="2026-11-14 12:48"></div>
+ <div class="ant-picker-dropdown _publish-time-dropdown_test ant-picker-dropdown-hidden" hidden>
+  <div class="ant-picker-date-panel"><div class="ant-picker-header-view"><span>2026年</span><span>11月</span></div>
+  <table><tr><td class="ant-picker-cell-in-view" title="2026-11-15"><div class="ant-picker-cell-inner">15</div></td></tr></table></div>
+  <ul class="ant-picker-time-panel-column"><li class="ant-picker-time-panel-cell"><div class="ant-picker-time-panel-cell-inner">12</div></li></ul>
+  <ul class="ant-picker-time-panel-column"><li class="ant-picker-time-panel-cell"><div class="ant-picker-time-panel-cell-inner">30</div></li></ul>
+  <div class="ant-picker-ok"><button type="button">确定</button></div>
+ </div>
  <div class="_high-cover-editor_test"><div class="_default-cover_test"><div class="_cover-full-editor_test">封面设置</div><img></div><button role="switch" aria-checked="false">PK封面</button><div class="_pk-upload_test">PK封面</div></div>
  <button id="publish">发布</button><button id="draft">存草稿</button>`);
  await page.evaluate(mode=>{
   window.submissions=0; window.coverNames=[]; window.confirms=0;
   document.querySelector('#publish').onclick=document.querySelector('#draft').onclick=()=>window.submissions++;
+  const schedule=document.querySelector('.ant-picker input');
+  const panel=document.querySelector('.ant-picker-dropdown');
+  schedule.onkeydown=event=>{
+   if(event.key!=='Enter')return;
+   panel.hidden=false;panel.classList.remove('ant-picker-dropdown-hidden');
+  };
+  const picks=[];
+  for(const option of panel.querySelectorAll('.ant-picker-cell-inner,.ant-picker-time-panel-cell-inner'))option.onclick=()=>picks.push(option.textContent);
+  panel.querySelector('.ant-picker-ok button').onclick=()=>{
+   if(picks.join(':')!=='15:12:30')return;
+   schedule.title='2026-11-15 12:30';schedule.value=schedule.title;
+   panel.hidden=true;panel.classList.add('ant-picker-dropdown-hidden');
+  };
   const toggle=document.querySelector('[role=switch]');toggle.onclick=()=>toggle.setAttribute('aria-checked',String(toggle.getAttribute('aria-checked')!=='true'));
   const editor=document.querySelector('#work-description-edit');
   if(mode==='rollback')editor.oninput=()=>setTimeout(()=>editor.textContent='平台回滚',0);
   function openCover(index){
    const modal=document.createElement('div');modal.className='ant-modal';modal.innerHTML='<div class="_header-title-item_test">封面截取</div><div class="_header-title-item_test">上传封面</div><button>确认</button>';
    document.body.append(modal);
-   modal.querySelectorAll('div')[1].onclick=()=>{
+   const showInput=()=>{
     const input=document.createElement('input');input.type='file';input.style.display='none';input.accept='image/*';modal.append(input);
     input.onchange=async()=>{
      window.coverNames.push(input.files[0].name);
@@ -29,6 +49,11 @@ for(const mode of ['success','scaled-preview','rollback','existing','wrong-image
      modal.append(canvas);
     };
    };
+   modal.querySelectorAll('div')[1].onclick=()=>{
+    if(mode!=='prefilled'){showInput();return;}
+    const clear=document.createElement('div');clear.className='_cropper-upload-clear_test';clear.textContent='清空上传';
+    modal.append(clear);clear.onclick=()=>{clear.remove();showInput();};
+   };
    modal.querySelector('button').onclick=()=>{
     window.confirms++;
     const image=new Image();image.src=modal.querySelector('canvas').toDataURL();
@@ -36,8 +61,17 @@ for(const mode of ['success','scaled-preview','rollback','existing','wrong-image
     modal.remove();
    };
   }
+  if(mode==='prefilled'){
+   const canvas=document.createElement('canvas');
+   canvas.width=canvas.height=4;
+   const ctx=canvas.getContext('2d');ctx.fillStyle='red';ctx.fillRect(0,0,4,4);
+   const existing=document.querySelector('._pk-upload_test');
+   existing.className='_pk-cover_test';
+   const img=new Image();img.src=canvas.toDataURL();existing.append(img);
+  }
   document.querySelector('._cover-full-editor_test').onclick=()=>openCover(0);
-  document.querySelector('._pk-upload_test').onclick=()=>openCover(1);
+  const emptyPk=document.querySelector('._pk-upload_test');
+  if(emptyPk)emptyPk.onclick=()=>openCover(1);
  },mode);
  await page.addScriptTag({content:code});
  const result=await page.evaluate(async mode=>{
@@ -53,8 +87,9 @@ for(const mode of ['success','scaled-preview','rollback','existing','wrong-image
  },mode);
  const state=await page.evaluate(()=>({text:document.querySelector('#work-description-edit').innerText,submissions,coverNames,confirms}));
  assert.equal(state.submissions,0);
- if(mode==='success'||mode==='scaled-preview'){
-  assert.match(result.reason,/作品描述已回读核验/);if(mode==='success')assert.match(result.reason,/定时发布时间/);assert.equal(state.text,'标题\n#一 #二 #三 #四');
+ if(mode==='prefilled'){assert.match(result.reason,/2 张封面预览/);assert.deepEqual(state.coverNames,['cover-0.png']);assert.equal(state.confirms,1);}
+ else if(mode==='success'||mode==='scaled-preview'){
+  assert.match(result.reason,/作品描述已回读核验/);if(mode==='success'){assert.match(result.reason,/定时发布时间/);assert.equal(await page.locator('.ant-picker input').getAttribute('title'),'2026-11-15 12:30');}assert.equal(state.text,'标题\n#一 #二 #三 #四');
   assert.deepEqual(state.coverNames,['cover-0.png','cover-1.png']);assert.equal(state.confirms,2);assert.ok(result.stages.includes('cover-1-confirm'));
  }else if(mode==='no-cover'){assert.match(result.reason,/保留平台默认封面/);assert.equal(state.confirms,0);}
  else {assert.ok(result.error,mode);assert.equal(state.confirms,0);}

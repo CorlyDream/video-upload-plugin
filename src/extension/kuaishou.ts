@@ -1,3 +1,4 @@
+import {scheduleOption, selectScheduleMonth, type SchedulePickerWait} from './schedule-picker';
 import {kuaishouDescription, type Publication} from '../core/publication';
 import type {Asset} from '../core/model';
 import {waitFor, type FillContext} from './xiaohongshu';
@@ -30,26 +31,66 @@ function closeToExpected(actual:HTMLCanvasElement, expected:HTMLCanvasElement):b
   return total/(a.length/4*3)<=24;
 }
 type KuaishouWait = <T>(read:()=>T|undefined|false,stage:string,label:string,timeout?:number,deferred?:boolean)=>Promise<T>;
-function setKuaishouInput(input: HTMLInputElement, value: string) {
-  const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;
-  if(!setter)throw new Error('无法设置快手定时发布时间');
-  setter.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));
-}
-async function setKuaishouSchedule(scheduleAt:string, wait:KuaishouWait, context:FillContext):Promise<string>{
-  const [date,time]=scheduleAt.split('T');
-  if(!date||!time)throw new Error('定时发布时间格式无效，请重新选择时间');
-  const radios=[...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')].filter(visible);
-  const scheduled=radios.find(input=>/定时发布/.test(input.closest('label,div')?.textContent??'') && input.value==='2') ?? radios.find(input=>input.value==='2');
-  if(!scheduled)return '快手编辑页没有定时控件，已跳过定时设置；';
-  context.progress('正在设置快手定时发布时间','schedule');
-  const wasEnabled=scheduled.checked;
-  if(!wasEnabled){context.edit(()=>scheduled.click());await wait(()=>scheduled.checked,'schedule','核验快手定时发布开关',10000,true);}
-  const input=await wait(()=>[...document.querySelectorAll<HTMLInputElement>('input')].filter(visible).find(element=>element!==scheduled && (/日期|时间/.test(`${element.placeholder} ${element.getAttribute('aria-label')??''}`)||/^\d{4}-\d{2}-\d{2}/.test(element.value))), 'schedule','等待快手定时日期和时间控件',10000);
-  const display=scheduleAt.replace('T',' ');
-  if(wasEnabled && input.value && input.value!==scheduleAt && input.value!==display)throw new Error('快手编辑页已有不同的定时发布时间，未覆盖，请手动检查');
-  context.edit(()=>setKuaishouInput(input,display));
-  await wait(()=>input.value===scheduleAt || input.value===display,'schedule','核验快手定时发布时间',10000,true);
-  return `已设置并回读快手定时发布时间 ${display}；请检查后手动发布。`;
+async function setKuaishouSchedule(scheduleAt: string, wait: KuaishouWait, context: FillContext): Promise<string> {
+  const [date, time] = scheduleAt.split('T');
+  if (!date || !time) throw new Error('定时发布时间格式无效，请重新选择时间');
+  const scheduled = [...document.querySelectorAll<HTMLInputElement>('input[type="radio"][value="2"]')]
+    .find(input => visible(input) && input.closest('label')?.textContent?.includes('定时发布'));
+  if (!scheduled) return '快手编辑页没有定时控件，已跳过定时设置；';
+  context.progress('正在设置快手定时发布时间', 'schedule');
+  const waitForPicker: SchedulePickerWait = (read, label) => wait(read, 'schedule', label, 10000, true);
+  const wasEnabled = scheduled.checked;
+  if (!wasEnabled) {
+    context.edit(() => scheduled.click());
+    await waitForPicker(() => scheduled.checked, '核验快手定时发布开关');
+  }
+  const readInput = () => one<HTMLInputElement>('.ant-picker input[placeholder="选择日期时间"]');
+  const input = await waitForPicker(readInput, '等待快手定时日期和时间控件');
+  const display = `${date} ${time}`;
+  const matches = () => {
+    const current = readInput();
+    return current?.value === display && current.title === display;
+  };
+  const note = `已设置并回读快手定时发布时间 ${display}；请检查后手动发布。`;
+  if (matches()) return note;
+  if (wasEnabled && input.title && input.title !== display) throw new Error('快手编辑页已有不同的定时发布时间，未覆盖，请手动检查');
+
+  const panel = () => one<HTMLElement>('.ant-picker-dropdown[class*="_publish-time-dropdown_"]:not(.ant-picker-dropdown-hidden)');
+  if (!panel()) {
+    context.edit(() => {
+      input.focus();
+      // The read-only picker opens from its own keyboard handler.
+      input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true}));
+    });
+  }
+  await waitForPicker(panel, '等待快手定时日历');
+  await selectScheduleMonth(date, () => {
+    const header = panel()?.querySelector('.ant-picker-date-panel .ant-picker-header-view');
+    return [...header?.children ?? []].map(e => e.textContent?.trim()).join(' ');
+  }, direction => {
+    const arrow = panel()?.querySelector<HTMLButtonElement>(`.ant-picker-date-panel .ant-picker-header-${direction === 'next' ? 'next' : 'prev'}-btn`);
+    if (!arrow || !visible(arrow) || arrow.disabled) throw new Error('快手定时日历无法切换月份，请手动检查');
+    context.edit(() => arrow.click());
+  }, waitForPicker, '快手');
+  const day = await waitForPicker(() => {
+    const root = panel();
+    return root && one<HTMLElement>(`td.ant-picker-cell-in-view[title="${CSS.escape(date)}"]:not(.ant-picker-cell-disabled) .ant-picker-cell-inner`, root);
+  }, '等待快手定时日期');
+  context.edit(() => day.click());
+  for (const [index, value] of time.split(':').entries()) {
+    const option = await waitForPicker(() => {
+      const column = panel()?.querySelectorAll('.ant-picker-time-panel-column')[index];
+      return column && scheduleOption(column, '.ant-picker-time-panel-cell:not(.ant-picker-time-panel-cell-disabled) .ant-picker-time-panel-cell-inner', value);
+    }, index === 0 ? '等待快手定时小时' : '等待快手定时分钟');
+    context.edit(() => option.click());
+  }
+  const confirm = await waitForPicker(() => {
+    const root = panel();
+    return root && one<HTMLButtonElement>('.ant-picker-ok button:not(:disabled)', root);
+  }, '等待快手定时确认按钮');
+  context.edit(() => confirm.click());
+  await waitForPicker(() => scheduled.checked && !panel() && matches(), '核验快手定时发布时间');
+  return note;
 }
 export async function fillKuaishou(publication:Publication, cover:Asset|undefined, context:FillContext, pkCovers:Asset[]=[], coverPk?:boolean):Promise<string>{
   const {signal,progress}=context;
@@ -117,28 +158,58 @@ export async function fillKuaishou(publication:Publication, cover:Asset|undefine
     if(!(asset.blob instanceof Blob)||!asset.type.startsWith('image/'))throw new Error('封面素材不可用');
     const slot=index?'[class^="_pk-cover_"]':'[class^="_default-cover_"]';
     const image=()=>one<HTMLImageElement>(slot+' img',fields.covers);
+    const bitmap = await createImageBitmap(asset.blob);
+    const expected = document.createElement('canvas');
+    expected.width = bitmap.width;
+    expected.height = bitmap.height;
+    expected.getContext('2d')!.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    guard(signal);
     const before=image()?.src??'';
-    if(index&&before)throw new Error('快手已有 PK 封面，未覆盖，请手动检查');
+    if (index && before) {
+      const existing = await wait(() => {
+        const img = image();
+        return img?.complete && img.naturalWidth > 0 ? img : undefined;
+      }, stage('baseline'), label+'：核验已有 PK 封面', 10000);
+      const preview = document.createElement('canvas');
+      preview.width = existing.naturalWidth;
+      preview.height = existing.naturalHeight;
+      try {
+        preview.getContext('2d')!.drawImage(existing, 0, 0);
+        if (Math.abs(preview.width / preview.height - expected.width / expected.height) < 0.01 && closeToExpected(preview, expected)) continue;
+      } catch (error) {
+        if (!(error instanceof DOMException) || error.name !== 'SecurityError') throw error;
+      }
+      throw new Error('快手已有不同的 PK 封面，未覆盖，请手动检查');
+    }
     const entry=one<HTMLElement>(index?'[class^="_pk-upload_"]':slot+' [class^="_cover-full-editor_"]',fields.covers);
     if(!entry)throw new Error('未找到唯一快手封面编辑入口');
-    progress(label+'：打开编辑器',stage('open'));entry.click();
+    progress(label+'：打开编辑器',stage('open'));
+    context.edit(() => entry.click());
     const modal=await wait(()=>one<HTMLElement>('.ant-modal'),'cover-'+index+'-open',label+'：打开编辑器');
     const tabs=[...modal.querySelectorAll<HTMLElement>('[class^="_header-title-item_"]')].filter(e=>e.textContent?.trim()==='上传封面'&&visible(e));
     if(tabs.length!==1||!modal.innerText.includes('封面截取'))throw new Error('快手封面弹窗不匹配');
-    guard(signal);tabs[0]!.click();
-    const input=await wait(()=>{
-      // Kuaishou intentionally hides this native input behind the upload dropzone.
-      const inputs=modal.querySelectorAll<HTMLInputElement>('input[type="file"][accept*="image"]');
-      if(inputs.length>1)throw new Error('快手封面上传入口不唯一');
+    context.edit(() => tabs[0]!.click());
+    const fileInput = () => {
+      if (!modal.isConnected || !visible(modal)) throw new Error('快手封面弹窗提前关闭，结果未确认');
+      // The platform hides this input behind the dropzone and removes it while a photo is loaded.
+      const inputs = modal.querySelectorAll<HTMLInputElement>('input[type="file"][accept*="image"]');
+      if (inputs.length > 1) throw new Error('快手封面上传入口不唯一');
       return inputs[0];
-    },stage('baseline'),label+'：等待上传入口就绪');
+    };
+    const ready = await wait(() => {
+      const input = fileInput();
+      if (input) return {input};
+      const clear = one<HTMLElement>('[class^="_cropper-upload-clear_"]', modal);
+      return clear?.textContent?.trim() === '清空上传' ? {clear} : undefined;
+    }, stage('baseline'), label+'：等待上传入口就绪');
+    // Clear only the image staged inside this dialog. The saved cover changes on confirmation.
+    if (ready.clear) context.edit(() => ready.clear.click());
+    const input = ready.input ?? await wait(fileInput, stage('baseline'), label+'：等待清空后的上传入口就绪');
     if(input.disabled||input.files?.length)throw new Error('快手封面上传入口已有文件，未覆盖');
-    const bitmap=await createImageBitmap(asset.blob);
-    const expected=document.createElement('canvas');expected.width=bitmap.width;expected.height=bitmap.height;
-    expected.getContext('2d')!.drawImage(bitmap,0,0);bitmap.close();
     guard(signal);
     const transfer=new DataTransfer();transfer.items.add(new File([asset.blob],asset.name,{type:asset.type,lastModified:asset.lastModified}));
-    input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}));
+    context.edit(() => { input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true})); });
     const confirm=await wait(()=>{
       if(!modal.isConnected||!visible(modal))throw new Error('快手封面弹窗提前关闭，结果未确认');
       if(/上传失败|上传出错|格式不支持/.test(modal.innerText))throw new Error('快手封面上传失败，请手动检查');
@@ -147,12 +218,12 @@ export async function fillKuaishou(publication:Publication, cover:Asset|undefine
       const buttons=[...modal.querySelectorAll<HTMLButtonElement>('button')].filter(b=>visible(b)&&b.textContent?.trim()==='确认'&&!b.disabled);
       return buttons.length===1?buttons[0]:undefined;
     },stage('upload'),label+'：上传与校验原图',120000);
-    guard(signal);progress(label+'：确认封面结果',stage('confirm'));confirm.click();
+    guard(signal);progress(label+'：确认封面结果',stage('confirm'));context.edit(() => confirm.click());
     await wait(()=>{
       const img=image();
       return (!modal.isConnected||!visible(modal))&&img?.complete&&img.naturalWidth>0&&img.src!==before;
     },stage('confirm'),label+'：确认封面结果',90000,true);
   }
   guard(signal);verifyCopy();
-  return `作品描述已回读核验（标题 + 前 4 个标签，不含正文）；${declarationNote}${scheduleNote}${covers.length?`${covers.length} 张封面预览已更新（请检查裁剪）`:'保留平台默认封面'}；${coverPk?'PK 已开启。':''}标签为 #文本，请检查平台话题。未发布、未存草稿。`;
+  return `作品描述已回读核验（标题 + 前 4 个标签，不含正文）；${declarationNote}${scheduleNote}${covers.length?`${covers.length} 张封面预览已核验（请检查裁剪）`:'保留平台默认封面'}；${coverPk?'PK 已开启。':''}标签为 #文本，请检查平台话题。未发布、未存草稿。`;
 }
